@@ -1,0 +1,9 @@
+/lh-agent
+/dist/
+*.exe
+*.test
+*.out
+.env
+.env.*
+.idea/
+.vscode/
