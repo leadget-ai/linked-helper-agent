@@ -5,71 +5,64 @@
 # or locally:
 #   powershell -ExecutionPolicy Bypass -File install.ps1
 #
-# Installs NSSM (via choco if available, otherwise direct download), drops the
-# agent binary into C:\Program Files\lh-agent, prompts for API endpoint + key,
-# registers a Windows service that runs under the *current* user account so it
-# can read Linked Helper's %APPDATA% partitions.
-
-#Requires -RunAsAdministrator
+# Registers the agent as a *native* Windows service — the binary speaks the
+# Service Control Manager protocol itself (golang.org/x/sys/windows/svc), so we
+# need no third-party service wrapper. The service runs as LocalSystem, which
+# has read access to every user's profile, so it can read Linked Helper's
+# lh.db under %APPDATA% without storing anyone's Windows password.
 
 $ErrorActionPreference = 'Stop'
+# Old PowerShell defaults to TLS 1.0/1.1, which GitHub now rejects.
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$ServiceName  = 'LhAgent'
-$ApiEndpoint  = 'https://api.leadget-analytics.rawnodes.com'
-$InstallDir   = 'C:\Program Files\lh-agent'
-$LogDir       = 'C:\ProgramData\lh-agent\logs'
-$NssmPath     = Join-Path $InstallDir 'nssm.exe'
-$AgentPath    = Join-Path $InstallDir 'lh-agent.exe'
-$ReleaseUrl   = 'https://github.com/leadget-ai/linked-helper-agent/releases/latest/download/lh-agent-windows-amd64.exe'
-$NssmZipUrl   = 'https://nssm.cc/release/nssm-2.24.zip'
+$ServiceName = 'LhAgent'
+$ApiEndpoint = 'https://api.leadget-analytics.rawnodes.com'
+$InstallDir  = 'C:\Program Files\lh-agent'
+$LogDir      = 'C:\ProgramData\lh-agent\logs'
+$AgentPath   = Join-Path $InstallDir 'lh-agent.exe'
+$ReleaseUrl  = 'https://github.com/leadget-ai/linked-helper-agent/releases/latest/download/lh-agent-windows-amd64.exe'
+$SvcRegKey   = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 
 function Write-Step($msg) { Write-Host ">> $msg" -ForegroundColor Cyan }
 function Write-OK($msg)   { Write-Host "OK $msg" -ForegroundColor Green }
+
+# 0. Elevation check. `#Requires -RunAsAdministrator` is silently ignored when
+#    the script is piped through `irm | iex`, so verify explicitly.
+$principal = New-Object Security.Principal.WindowsPrincipal(
+  [Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
+  throw 'This installer must run in an elevated PowerShell (Run as Administrator).'
+}
 
 # 1. Folders
 Write-Step "Creating $InstallDir and $LogDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir     | Out-Null
 
-# 2. NSSM — preferred way to run a Go binary as a service. sc.exe technically
-#    works for console exes too but its restart/logging story is awful and we
-#    don't want to reinvent it.
-if (-not (Test-Path $NssmPath)) {
-  Write-Step 'Fetching NSSM 2.24'
-  $tmpZip = Join-Path $env:TEMP 'nssm.zip'
-  $tmpDir = Join-Path $env:TEMP 'nssm-extract'
-  Invoke-WebRequest -Uri $NssmZipUrl -OutFile $tmpZip
-  Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
-  Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force
-  Copy-Item -Force "$tmpDir\nssm-2.24\win64\nssm.exe" $NssmPath
-  Remove-Item -Force $tmpZip
-  Remove-Item -Recurse -Force $tmpDir
-  Write-OK 'NSSM ready'
+# 2. Read existing service env (on upgrade) BEFORE we tear the service down, so
+#    we don't re-ask for settings the operator already supplied.
+$existingEnv = @{}
+if (Test-Path $SvcRegKey) {
+  $raw = (Get-ItemProperty -Path $SvcRegKey -Name Environment -ErrorAction SilentlyContinue).Environment
+  foreach ($line in $raw) {
+    if ($line -match '^([^=]+)=(.*)$') { $existingEnv[$matches[1]] = $matches[2] }
+  }
 }
 
-# 3. Download the latest agent. We always overwrite — if the service is
-#    already registered we stop it first so the file isn't locked.
+# 3. Stop and remove any existing registration so we can drop a fresh binary
+#    and re-create the service cleanly (avoids stale binPath / locked file).
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
-  Write-Step "Stopping existing $ServiceName so we can replace the binary"
-  & $NssmPath stop $ServiceName confirm | Out-Null
+  Write-Step "Stopping and removing existing $ServiceName"
+  Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+  sc.exe delete $ServiceName | Out-Null
   Start-Sleep -Seconds 2
 }
 
+# 4. Download the latest agent binary.
 Write-Step 'Downloading lh-agent.exe'
 Invoke-WebRequest -Uri $ReleaseUrl -OutFile $AgentPath -UseBasicParsing
 Write-OK 'Agent binary in place'
-
-# 4. Read existing service env (if upgrading) so we don't ask for the API key
-#    again on reinstall. Falls back to prompting if absent.
-$existingEnv = @{}
-if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
-  $raw = & $NssmPath get $ServiceName AppEnvironmentExtra 2>$null
-  if ($LASTEXITCODE -eq 0 -and $raw) {
-    foreach ($line in $raw -split "`r?`n") {
-      if ($line -match '^([^=]+)=(.*)$') { $existingEnv[$matches[1]] = $matches[2] }
-    }
-  }
-}
 
 function PromptOrKeep($name, $default, [switch]$Secret) {
   if ($default) { return $default }
@@ -80,67 +73,55 @@ function PromptOrKeep($name, $default, [switch]$Secret) {
   return Read-Host "$name"
 }
 
-# Endpoint is fixed for this deployment — never prompted. An existing service
-# env still wins on upgrade in case it was pointed elsewhere manually.
+# Endpoint is fixed for this deployment; an existing value still wins on upgrade.
 $apiEndpoint   = if ($existingEnv['LHA_API_ENDPOINT']) { $existingEnv['LHA_API_ENDPOINT'] } else { $ApiEndpoint }
 Write-Step "Using API endpoint $apiEndpoint"
-$apiKey        = PromptOrKeep 'LHA_API_KEY (issued from the platform UI)'      $existingEnv['LHA_API_KEY'] -Secret
+$apiKey        = PromptOrKeep 'LHA_API_KEY (issued from the platform UI)' $existingEnv['LHA_API_KEY'] -Secret
+
+# %APPDATA% here is the *installing* admin's Roaming folder. If Linked Helper
+# runs under a different account, type that user's path (e.g.
+# C:\Users\manager\AppData\Roaming\linked-helper\Partitions). The LocalSystem
+# service can read any user's profile, so only the path needs to be correct.
 $defaultParts  = Join-Path $env:APPDATA 'linked-helper\Partitions'
-$partitionsDir = PromptOrKeep "LHA_PARTITIONS_DIR (default: $defaultParts)"    $existingEnv['LHA_PARTITIONS_DIR']
+$partitionsDir = PromptOrKeep "LHA_PARTITIONS_DIR (default: $defaultParts)" $existingEnv['LHA_PARTITIONS_DIR']
 if (-not $partitionsDir) { $partitionsDir = $defaultParts }
 
 if (-not (Test-Path $partitionsDir)) {
   Write-Warning "$partitionsDir does not exist yet. Linked Helper creates it on first launch."
 }
 
-# 5. Register service. ObjectName = current interactive user so we can read
-#    their %APPDATA%. NSSM needs the password to attach the service to a user
-#    account — there's no LocalSystem trick that lets it touch HKCU/APPDATA
-#    of someone else cleanly.
-$currentUser = "$env:USERDOMAIN\$env:USERNAME"
-Write-Step "Registering service $ServiceName under $currentUser"
+# 5. Create the service (runs as LocalSystem by default — no -Credential).
+Write-Step "Creating service $ServiceName"
+New-Service -Name $ServiceName -BinaryPathName "`"$AgentPath`"" `
+  -DisplayName 'LH Agent' -StartupType Automatic | Out-Null
 
-if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
-  & $NssmPath install $ServiceName $AgentPath | Out-Null
-} else {
-  & $NssmPath set $ServiceName Application $AgentPath | Out-Null
-}
+# 6. Per-service environment lives in the service's registry key as REG_MULTI_SZ;
+#    the SCM merges it into the process environment at launch. This keeps the API
+#    key out of the machine-wide environment.
+Write-Step 'Writing service environment'
+$envLines = @(
+  "LHA_API_ENDPOINT=$apiEndpoint",
+  "LHA_API_KEY=$apiKey",
+  "LHA_PARTITIONS_DIR=$partitionsDir",
+  "LHA_LOG_LEVEL=info"
+)
+New-ItemProperty -Path $SvcRegKey -Name Environment -PropertyType MultiString -Value $envLines -Force | Out-Null
 
-$accountPwd = Read-Host -AsSecureString "Windows password for $currentUser (so the service can run as you)"
-$plainPwd   = [System.Net.NetworkCredential]::new('', $accountPwd).Password
-& $NssmPath set $ServiceName ObjectName $currentUser $plainPwd | Out-Null
+# 7. Crash recovery: restart with backoff (10s, 30s, 60s); reset the counter
+#    after a day of stability. Built into the SCM — no wrapper needed.
+Write-Step 'Configuring automatic restart on failure'
+sc.exe failure $ServiceName reset= 86400 actions= restart/10000/restart/30000/restart/60000 | Out-Null
 
-# Env passed to the agent. NSSM joins these with newlines internally.
-& $NssmPath set $ServiceName AppEnvironmentExtra `
-  "LHA_API_ENDPOINT=$apiEndpoint" `
-  "LHA_API_KEY=$apiKey" `
-  "LHA_PARTITIONS_DIR=$partitionsDir" `
-  "LHA_LOG_LEVEL=info" | Out-Null
-
-# Logs: stdout/stderr go to rotating files in ProgramData. NSSM rotates them
-# itself when they hit AppRotateBytes — 10 MiB is small enough to tail safely.
-& $NssmPath set $ServiceName AppStdout    (Join-Path $LogDir 'lh-agent.log')     | Out-Null
-& $NssmPath set $ServiceName AppStderr    (Join-Path $LogDir 'lh-agent.err.log') | Out-Null
-& $NssmPath set $ServiceName AppRotateFiles 1                | Out-Null
-& $NssmPath set $ServiceName AppRotateOnline 1               | Out-Null
-& $NssmPath set $ServiceName AppRotateBytes 10485760         | Out-Null
-
-# Restart automatically on crash, with backoff to avoid hot-loop on a bad
-# config (10s → 30s → 60s).
-& $NssmPath set $ServiceName AppRestartDelay 10000 | Out-Null
-& $NssmPath set $ServiceName Start SERVICE_AUTO_START | Out-Null
-
+# 8. Start it.
 Write-Step "Starting $ServiceName"
-& $NssmPath start $ServiceName | Out-Null
+Start-Service -Name $ServiceName
 Start-Sleep -Seconds 2
-
 $svc = Get-Service -Name $ServiceName
-Write-OK  "Service $ServiceName is $($svc.Status)"
+Write-OK "Service $ServiceName is $($svc.Status)"
 
 Write-Host ''
 Write-Host 'Logs:' -ForegroundColor Yellow
 Write-Host "  Get-Content -Wait '$LogDir\lh-agent.log'"
-Write-Host "  Get-Content -Wait '$LogDir\lh-agent.err.log'"
 Write-Host ''
 Write-Host 'Service control:' -ForegroundColor Yellow
 Write-Host "  Restart-Service $ServiceName"

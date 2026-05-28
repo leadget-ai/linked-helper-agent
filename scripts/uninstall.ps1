@@ -1,21 +1,21 @@
-#Requires -RunAsAdministrator
 $ErrorActionPreference = 'Continue'
+
+$principal = New-Object Security.Principal.WindowsPrincipal(
+  [Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
+  throw 'This uninstaller must run in an elevated PowerShell (Run as Administrator).'
+}
 
 $ServiceName = 'LhAgent'
 $InstallDir  = 'C:\Program Files\lh-agent'
-$LogDir      = 'C:\ProgramData\lh-agent'
-$NssmPath    = Join-Path $InstallDir 'nssm.exe'
+$DataDir     = 'C:\ProgramData\lh-agent'
 
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
-  if (Test-Path $NssmPath) {
-    & $NssmPath stop   $ServiceName confirm | Out-Null
-    & $NssmPath remove $ServiceName confirm | Out-Null
-  } else {
-    sc.exe stop   $ServiceName | Out-Null
-    sc.exe delete $ServiceName | Out-Null
-  }
+  Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+  sc.exe delete $ServiceName | Out-Null
 }
 
 Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force $LogDir     -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force $DataDir    -ErrorAction SilentlyContinue
 Write-Host "Uninstalled $ServiceName"

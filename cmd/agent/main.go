@@ -30,18 +30,31 @@ func main() {
 	}
 	log.SetLevel(level)
 
-	log.WithFields(log.Fields{"version": version, "commit": commit}).Info("lh-agent starting")
-
-	cfg, err := agent.LoadConfig()
+	// On Windows the Service Control Manager launches us with no console, so
+	// detect that first and, when true, redirect logs to a file before we emit
+	// anything. On every other path this is a no-op.
+	isService, err := inWindowsService()
 	if err != nil {
-		log.WithError(err).Fatal("failed to load config")
+		log.WithError(err).Fatal("failed to determine windows service mode")
+	}
+	if isService {
+		configureServiceLogging()
 	}
 
+	log.WithFields(log.Fields{"version": version, "commit": commit, "service": isService}).
+		Info("lh-agent starting")
+
+	if isService {
+		if err := runWindowsService(); err != nil {
+			log.WithError(err).Fatal("windows service failed")
+		}
+		return
+	}
+
+	// Console / non-Windows path: tie the agent lifetime to OS signals.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// SIGINT/SIGTERM trigger graceful shutdown — the main loop unwinds
-	// through `ctx.Done()` and the SQLite handles flush on Reader.Close().
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -49,6 +62,20 @@ func main() {
 		log.WithField("signal", sig.String()).Info("received shutdown signal")
 		cancel()
 	}()
+
+	if err := runAgent(ctx); err != nil {
+		log.WithError(err).Fatal("agent failed")
+	}
+	log.Info("lh-agent stopped")
+}
+
+// runAgent loads config and runs the agent until ctx is cancelled. Shared by
+// the console path and the Windows service control handler.
+func runAgent(ctx context.Context) error {
+	cfg, err := agent.LoadConfig()
+	if err != nil {
+		return err
+	}
 
 	if os.Getenv("LHA_PPROF") == "true" {
 		go func() {
@@ -61,6 +88,5 @@ func main() {
 
 	a := agent.New(cfg, version)
 	a.Run(ctx)
-
-	log.Info("lh-agent stopped")
+	return nil
 }
