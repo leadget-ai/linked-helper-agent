@@ -15,6 +15,7 @@
 $ErrorActionPreference = 'Stop'
 
 $ServiceName  = 'LhAgent'
+$ApiEndpoint  = 'https://api.leadget-analytics.rawnodes.com'
 $InstallDir   = 'C:\Program Files\lh-agent'
 $LogDir       = 'C:\ProgramData\lh-agent\logs'
 $NssmPath     = Join-Path $InstallDir 'nssm.exe'
@@ -79,7 +80,10 @@ function PromptOrKeep($name, $default, [switch]$Secret) {
   return Read-Host "$name"
 }
 
-$apiEndpoint   = PromptOrKeep 'LHA_API_ENDPOINT (e.g. https://api.leadget.ai)' $existingEnv['LHA_API_ENDPOINT']
+# Endpoint is fixed for this deployment — never prompted. An existing service
+# env still wins on upgrade in case it was pointed elsewhere manually.
+$apiEndpoint   = if ($existingEnv['LHA_API_ENDPOINT']) { $existingEnv['LHA_API_ENDPOINT'] } else { $ApiEndpoint }
+Write-Step "Using API endpoint $apiEndpoint"
 $apiKey        = PromptOrKeep 'LHA_API_KEY (issued from the platform UI)'      $existingEnv['LHA_API_KEY'] -Secret
 $defaultParts  = Join-Path $env:APPDATA 'linked-helper\Partitions'
 $partitionsDir = PromptOrKeep "LHA_PARTITIONS_DIR (default: $defaultParts)"    $existingEnv['LHA_PARTITIONS_DIR']

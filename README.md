@@ -10,7 +10,7 @@ Environment variables:
 
 | Var | Required | Purpose |
 | --- | --- | --- |
-| `LHA_API_ENDPOINT` | yes | Platform base URL, e.g. `https://api.leadget.ai` |
+| `LHA_API_ENDPOINT` | yes | Platform base URL. Defaults to `https://api.leadget-analytics.rawnodes.com` (set automatically by the Windows installer) |
 | `LHA_API_KEY` | yes | Agent bearer token issued from the platform UI |
 | `LHA_PARTITIONS_DIR` | yes | Path to the Linked Helper `Partitions` folder |
 | `LHA_LOG_LEVEL` | no | `debug` / `info` (default) / `warn` / `error` |
@@ -25,7 +25,8 @@ Default `LHA_PARTITIONS_DIR` per OS:
 
 ## Install on Windows
 
-Open **PowerShell as Administrator** and run:
+Sign in as the **same Windows user that runs Linked Helper** (the agent reads
+that user's `%APPDATA%`), open **PowerShell as Administrator**, and run:
 
 ```powershell
 irm https://github.com/leadget-ai/linked-helper-agent/releases/latest/download/install.ps1 | iex
@@ -35,9 +36,14 @@ The installer will:
 
 1. Drop the agent binary into `C:\Program Files\lh-agent\`.
 2. Install [NSSM](https://nssm.cc) (downloaded automatically).
-3. Ask for `LHA_API_ENDPOINT`, `LHA_API_KEY`, `LHA_PARTITIONS_DIR` (default points at `%APPDATA%\linked-helper\Partitions`).
-4. Ask for your **Windows password** so the service can run as your user — needed to read `%APPDATA%`.
-5. Register `LhAgent` as a Windows service (auto-start on boot) and start it.
+3. Use the built-in API endpoint (`https://api.leadget-analytics.rawnodes.com`) — no prompt.
+4. Ask for your `LHA_API_KEY` (entered hidden) and `LHA_PARTITIONS_DIR` (press Enter to accept the default `%APPDATA%\linked-helper\Partitions`).
+5. Ask for your **Windows password** so the service can run as your user — needed to read `%APPDATA%`.
+6. Register `LhAgent` as a Windows service (auto-start on boot) and start it.
+
+> `%APPDATA%` resolves to the Roaming profile, so the default partitions path
+> becomes e.g. `C:\Users\manager\AppData\Roaming\linked-helper\Partitions`. If
+> you install from a different admin account, enter the correct path at step 4.
 
 Re-run the same command at any time to **upgrade** to the latest version. The installer keeps your saved settings — it'll only re-ask for the Windows password.
 
