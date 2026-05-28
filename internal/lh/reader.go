@@ -28,10 +28,16 @@ type Campaign struct {
 
 // AccountOwner is the LinkedIn identity behind one LH login, used so the
 // platform can later automatch the LH account to an existing Client.
+//
+// ExternalID is LinkedIn's internal numeric member ID — stable across name
+// changes / URL rewrites and our best key for matching. Email and FullName
+// are softer matchers used as fallbacks when the platform doesn't yet have
+// the LinkedIn id of a known client.
 type AccountOwner struct {
-	ProfileURL *string
-	PublicID   *string
-	Nickname   *string
+	ExternalID *int64
+	Email      *string
+	FullName   *string
+	Avatar     *string
 }
 
 // Reader owns one open SQLite connection pool per LH account database. Pools
@@ -147,45 +153,60 @@ func (r *Reader) ReadCampaigns(ctx context.Context, dbPath, since string) ([]Cam
 }
 
 // ReadAccountOwner pulls the LH login's LinkedIn identity from `li_accounts`,
-// best-effort. Older LH databases may not have all columns — missing ones are
-// returned as nil pointers and the agent moves on.
+// best-effort. `li_accounts` is keyed by `id`; the user-facing login is row 1
+// in every LH partition we've seen.
+//
+// Schema observed in LH 2 (May 2026): id, external_id, full_name, avatar,
+// email, last_login_at, created_at, updated_at. Older LH builds carried
+// `name` / `public_identifier` / `profile_url` instead — we don't read those
+// any more because the new schema doesn't have them and even the legacy
+// fallback never gave us a numeric LinkedIn member id, which is the most
+// useful matcher.
+//
+// Returns (nil, nil) when the row is missing or the query fails — the agent
+// treats it as "owner unknown" and ships the account anyway. We never fail
+// the whole sync over the owner field.
 func (r *Reader) ReadAccountOwner(ctx context.Context, dbPath string) (*AccountOwner, error) {
 	db, err := r.open(dbPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// `li_accounts` is keyed by `id`; the user-facing login is row 1 in every
-	// LH partition we've seen. The other columns are optional and queried
-	// defensively because LH renames them between major versions.
 	row := db.QueryRowContext(ctx, `
-		SELECT
-			COALESCE(name, '') as nickname,
-			COALESCE(public_identifier, '') as public_id,
-			COALESCE(profile_url, '') as profile_url
+		SELECT external_id, full_name, email, avatar
 		FROM li_accounts
 		WHERE id = 1
 	`)
 
-	var nickname, publicID, profileURL string
-	if err := row.Scan(&nickname, &publicID, &profileURL); err != nil {
+	var (
+		externalID sql.NullInt64
+		fullName   sql.NullString
+		email      sql.NullString
+		avatar     sql.NullString
+	)
+	if err := row.Scan(&externalID, &fullName, &email, &avatar); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
-		// Older LH builds may lack profile_url / public_identifier columns —
-		// don't fail the whole sync over the owner field.
 		return nil, nil //nolint:nilerr
 	}
 
 	owner := &AccountOwner{}
-	if nickname != "" {
-		owner.Nickname = &nickname
+	if externalID.Valid {
+		v := externalID.Int64
+		owner.ExternalID = &v
 	}
-	if publicID != "" {
-		owner.PublicID = &publicID
+	if fullName.Valid && fullName.String != "" {
+		s := fullName.String
+		owner.FullName = &s
 	}
-	if profileURL != "" {
-		owner.ProfileURL = &profileURL
+	if email.Valid && email.String != "" {
+		s := email.String
+		owner.Email = &s
+	}
+	if avatar.Valid && avatar.String != "" {
+		s := avatar.String
+		owner.Avatar = &s
 	}
 	return owner, nil
 }

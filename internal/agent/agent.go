@@ -243,13 +243,12 @@ func (a *Agent) buildReport(
 	// placeholder rows.
 	if !a.known.hasAccount(accountID) && (owner != nil || len(campaigns) > 0) {
 		req.RegisterAccount = &client.RegisterAccount{}
-		if owner != nil {
-			req.RegisterAccount.Nickname = owner.Nickname
-			if owner.ProfileURL != nil || owner.PublicID != nil {
-				req.RegisterAccount.Owner = &client.AccountOwner{
-					ProfileURL: owner.ProfileURL,
-					PublicID:   owner.PublicID,
-				}
+		if owner != nil && hasOwnerSignal(owner) {
+			req.RegisterAccount.Owner = &client.AccountOwner{
+				ExternalID: owner.ExternalID,
+				Email:      owner.Email,
+				FullName:   owner.FullName,
+				Avatar:     owner.Avatar,
 			}
 		}
 	}
@@ -310,4 +309,12 @@ func (a *Agent) setReportInterval(d time.Duration) {
 	a.mu.Lock()
 	a.reportInterval = clamped
 	a.mu.Unlock()
+}
+
+// hasOwnerSignal returns true when the LH owner row carried at least one
+// matchable field. We use this to keep RegisterAccount.Owner nil for the
+// "owner row exists but every field is null" edge case (the platform can
+// then create a placeholder Client without forcing a match attempt).
+func hasOwnerSignal(o *lh.AccountOwner) bool {
+	return o.ExternalID != nil || o.Email != nil || o.FullName != nil
 }

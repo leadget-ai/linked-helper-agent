@@ -1,8 +1,10 @@
 /lh-agent
+/dbschema
 /dist/
 *.exe
 *.test
 *.out
+*.db
 .env
 .env.*
 .idea/

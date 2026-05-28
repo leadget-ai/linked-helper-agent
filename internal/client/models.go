@@ -34,17 +34,23 @@ type KnownCampaign struct {
 
 // AccountOwner is the LinkedIn identity behind one LH login, used so the
 // platform can later automatch the account to an existing Client.
+//
+// externalId is LinkedIn's internal numeric member id — stable across name
+// changes / vanity-URL rewrites and the strongest matcher we have. Email
+// and fullName are softer matchers used as fallbacks when the platform
+// doesn't yet know the LinkedIn id of a Client.
 type AccountOwner struct {
-	ProfileURL *string `json:"profileUrl,omitempty"`
-	PublicID   *string `json:"publicId,omitempty"`
+	ExternalID *int64  `json:"externalId,omitempty"`
+	Email      *string `json:"email,omitempty"`
+	FullName   *string `json:"fullName,omitempty"`
+	Avatar     *string `json:"avatar,omitempty"`
 }
 
 // RegisterAccount is sent only the first time an LH accountId is reported.
 // The platform creates a Client + platform-link (PENDING) from this; later
 // cycles omit the block entirely.
 type RegisterAccount struct {
-	Nickname *string       `json:"nickname,omitempty"`
-	Owner    *AccountOwner `json:"owner,omitempty"`
+	Owner *AccountOwner `json:"owner,omitempty"`
 }
 
 // CampaignAction is a single workflow step from the lh.db actions table.
