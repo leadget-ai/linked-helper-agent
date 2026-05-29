@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
 
@@ -244,11 +245,12 @@ func (a *Agent) buildReport(
 	if !a.known.hasAccount(accountID) && (owner != nil || len(campaigns) > 0) {
 		req.RegisterAccount = &client.RegisterAccount{}
 		if owner != nil && hasOwnerSignal(owner) {
-			req.RegisterAccount.Owner = &client.AccountOwner{
-				ExternalID: owner.ExternalID,
-				Email:      owner.Email,
-				FullName:   owner.FullName,
-				Avatar:     owner.Avatar,
+			req.RegisterAccount.Email = owner.Email
+			req.RegisterAccount.FullName = owner.FullName
+			req.RegisterAccount.Avatar = owner.Avatar
+			if owner.ExternalID != nil {
+				s := strconv.FormatInt(*owner.ExternalID, 10)
+				req.RegisterAccount.ExternalID = &s
 			}
 		}
 	}
@@ -262,7 +264,10 @@ func (a *Agent) buildReport(
 	for _, c := range campaigns {
 		cid := int(c.ID)
 
-		if !a.known.hasCampaign(accountID, cid) {
+		// Re-register on first sight AND on any LH version bump — knownState
+		// pins to (accountId, campaignId, version) so renames / pause toggles
+		// / step edits propagate to the platform automatically.
+		if !a.known.hasCampaignAtVersion(accountID, cid, c.Version) {
 			req.RegisterCampaigns = append(req.RegisterCampaigns, client.RegisterCampaign{
 				CampaignID:  cid,
 				Name:        c.Name,
@@ -271,6 +276,7 @@ func (a *Agent) buildReport(
 				IsPaused:    c.IsPaused,
 				IsArchived:  c.IsArchived,
 				CreatedAt:   c.CreatedAt,
+				Version:     c.Version,
 				// V1: workflow step definitions aren't reverse-engineered from
 				// the `actions` table yet. Empty here means the platform will
 				// create the Campaign row without messages — they were already
@@ -312,7 +318,7 @@ func (a *Agent) setReportInterval(d time.Duration) {
 }
 
 // hasOwnerSignal returns true when the LH owner row carried at least one
-// matchable field. We use this to keep RegisterAccount.Owner nil for the
+// matchable field. We use this to leave RegisterAccount fields nil for the
 // "owner row exists but every field is null" edge case (the platform can
 // then create a placeholder Client without forcing a match attempt).
 func hasOwnerSignal(o *lh.AccountOwner) bool {

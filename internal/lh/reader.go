@@ -24,6 +24,10 @@ type Campaign struct {
 	IsArchived  bool
 	IsValid     *bool
 	CreatedAt   string // raw ISO string as LH stores it
+	// Latest version_id from campaign_last_versions (LH bumps this on any
+	// edit — rename, pause, step changes). 0 if the campaign has no
+	// versions yet, which shouldn't happen for a live campaign.
+	Version int
 }
 
 // AccountOwner is the LinkedIn identity behind one LH login, used so the
@@ -119,10 +123,14 @@ func (r *Reader) ReadCampaigns(ctx context.Context, dbPath, since string) ([]Cam
 	}
 
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, name, description, type, is_paused, is_archived, is_valid, created_at
-		FROM campaigns
-		WHERE created_at > ?
-		ORDER BY created_at
+		SELECT
+			c.id, c.name, c.description, c.type,
+			c.is_paused, c.is_archived, c.is_valid, c.created_at,
+			COALESCE(clv.version_id, 0) AS version
+		FROM campaigns c
+		LEFT JOIN campaign_last_versions clv ON clv.campaign_id = c.id
+		WHERE c.created_at > ?
+		ORDER BY c.created_at
 	`, since)
 	if err != nil {
 		return nil, fmt.Errorf("select campaigns: %w", err)
@@ -135,7 +143,7 @@ func (r *Reader) ReadCampaigns(ctx context.Context, dbPath, since string) ([]Cam
 		var desc sql.NullString
 		var isPaused, isArchived int
 		var isValid sql.NullInt64
-		if err := rows.Scan(&c.ID, &c.Name, &desc, &c.Type, &isPaused, &isArchived, &isValid, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &desc, &c.Type, &isPaused, &isArchived, &isValid, &c.CreatedAt, &c.Version); err != nil {
 			return nil, fmt.Errorf("scan campaign: %w", err)
 		}
 		if desc.Valid {

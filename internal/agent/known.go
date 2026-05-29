@@ -14,9 +14,13 @@ import (
 // Reads happen during payload construction; writes happen on response. Both
 // sides are short, so a single mutex is fine — no need for atomic sets.
 type known struct {
-	mu        sync.RWMutex
-	accounts  map[int]struct{}
-	campaigns map[campaignKey]struct{}
+	mu       sync.RWMutex
+	accounts map[int]struct{}
+	// Value is the version the platform last accepted for this campaign.
+	// Agent re-registers when its current LH version_id differs (covers
+	// rename / pause toggle / step edits — knownState would otherwise pin
+	// the platform to the first-seen snapshot forever).
+	campaigns map[campaignKey]int
 }
 
 // campaignKey deduplicates the (accountId, campaignId) tuple — the platform
@@ -30,7 +34,7 @@ type campaignKey struct {
 func newKnown() *known {
 	return &known{
 		accounts:  make(map[int]struct{}),
-		campaigns: make(map[campaignKey]struct{}),
+		campaigns: make(map[campaignKey]int),
 	}
 }
 
@@ -42,9 +46,9 @@ func (k *known) replace(s client.KnownState) {
 	for _, id := range s.Accounts {
 		accounts[id] = struct{}{}
 	}
-	campaigns := make(map[campaignKey]struct{}, len(s.Campaigns))
+	campaigns := make(map[campaignKey]int, len(s.Campaigns))
 	for _, c := range s.Campaigns {
-		campaigns[campaignKey{c.AccountID, c.CampaignID}] = struct{}{}
+		campaigns[campaignKey{c.AccountID, c.CampaignID}] = c.Version
 	}
 
 	k.mu.Lock()
@@ -60,9 +64,12 @@ func (k *known) hasAccount(accountID int) bool {
 	return ok
 }
 
-func (k *known) hasCampaign(accountID, campaignID int) bool {
+// hasCampaignAtVersion is true only when the platform has this campaign AND
+// its accepted version matches what the agent is about to send. Mismatches
+// (or unknown campaigns) trigger a full registerCampaign so updates propagate.
+func (k *known) hasCampaignAtVersion(accountID, campaignID, version int) bool {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
-	_, ok := k.campaigns[campaignKey{accountID, campaignID}]
-	return ok
+	v, ok := k.campaigns[campaignKey{accountID, campaignID}]
+	return ok && v == version
 }

@@ -30,27 +30,27 @@ type KnownState struct {
 type KnownCampaign struct {
 	AccountID  int `json:"accountId"`
 	CampaignID int `json:"campaignId"`
-}
-
-// AccountOwner is the LinkedIn identity behind one LH login, used so the
-// platform can later automatch the account to an existing Client.
-//
-// externalId is LinkedIn's internal numeric member id — stable across name
-// changes / vanity-URL rewrites and the strongest matcher we have. Email
-// and fullName are softer matchers used as fallbacks when the platform
-// doesn't yet know the LinkedIn id of a Client.
-type AccountOwner struct {
-	ExternalID *int64  `json:"externalId,omitempty"`
-	Email      *string `json:"email,omitempty"`
-	FullName   *string `json:"fullName,omitempty"`
-	Avatar     *string `json:"avatar,omitempty"`
+	// Version the platform last accepted. The agent skips re-register only
+	// when its current LH version_id matches; any bump means re-send so
+	// renames / pause toggles / step edits propagate. 0 = pre-versioning row
+	// → unconditional re-register on the next cycle.
+	Version int `json:"version"`
 }
 
 // RegisterAccount is sent only the first time an LH accountId is reported.
 // The platform creates a Client + platform-link (PENDING) from this; later
 // cycles omit the block entirely.
+//
+// externalId is LinkedIn's internal numeric member id — stable across name
+// changes / vanity-URL rewrites and the strongest matcher we have. Email
+// and fullName are softer matchers used as fallbacks when the platform
+// doesn't yet know the LinkedIn id of a Client. Shape is flat to match the
+// platform DTO (LhAgentRegisterAccountDto).
 type RegisterAccount struct {
-	Owner *AccountOwner `json:"owner,omitempty"`
+	ExternalID *string `json:"externalId,omitempty"`
+	Email      *string `json:"email,omitempty"`
+	FullName   *string `json:"fullName,omitempty"`
+	Avatar     *string `json:"avatar,omitempty"`
 }
 
 // CampaignAction is a single workflow step from the lh.db actions table.
@@ -62,14 +62,18 @@ type CampaignAction struct {
 // RegisterCampaign is sent once per LH campaign the agent has just
 // discovered. Subsequent cycles only ship its CampaignFunnel.
 type RegisterCampaign struct {
-	CampaignID  int              `json:"campaignId"`
-	Name        string           `json:"name"`
-	Description *string          `json:"description,omitempty"`
-	Type        int              `json:"type"`
-	IsPaused    bool             `json:"isPaused"`
-	IsArchived  bool             `json:"isArchived"`
-	CreatedAt   string           `json:"createdAt"`
-	Actions     []CampaignAction `json:"actions"`
+	CampaignID  int     `json:"campaignId"`
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+	Type        int     `json:"type"`
+	IsPaused    bool    `json:"isPaused"`
+	IsArchived  bool    `json:"isArchived"`
+	CreatedAt   string  `json:"createdAt"`
+	// LH campaign_last_versions.version_id at the moment of send. Echoed
+	// back in knownState so future cycles can short-circuit unchanged
+	// campaigns.
+	Version int              `json:"version"`
+	Actions []CampaignAction `json:"actions"`
 }
 
 // CampaignFunnel carries the volatile counters that always overwrite the
