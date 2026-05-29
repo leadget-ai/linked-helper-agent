@@ -160,6 +160,88 @@ func (r *Reader) ReadCampaigns(ctx context.Context, dbPath, since string) ([]Cam
 	return out, rows.Err()
 }
 
+// CampaignActionRow is one workflow step joined out of the LH schema. The
+// step "type" lives on action_configs.actionType and the template/cooldown
+// live on action_configs.actionSettings/coolDown. Body/Example are populated
+// only for messaging actions where the template renderer found content.
+type CampaignActionRow struct {
+	Type    string
+	Body    *string
+	Example *string
+	// CoolDownMs is action_configs.coolDown — milliseconds the LH client
+	// waits after dispatching this action before it picks up the next item.
+	// Stored on the message so the platform UI can hint at cadence, even
+	// when we don't have a preceding Waiter to map to delayValue/Unit.
+	CoolDownMs *int64
+}
+
+// ReadCampaignActions walks campaign → last_version → version_actions →
+// actions → action_versions → action_configs and returns every step in
+// workflow order. Non-messaging actions come back with Body=Example=nil so
+// the caller can keep their position when assigning seq numbers but skip
+// them when writing CampaignMessage rows.
+func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaignID int64) ([]CampaignActionRow, error) {
+	db, err := r.open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// We join through action_versions to find the latest config per action.
+	// One action may have multiple versions; the highest id wins, mirroring
+	// how LH itself resolves "current settings".
+	rows, err := db.QueryContext(ctx, `
+		WITH latest_av AS (
+			SELECT av.action_id, MAX(av.id) AS max_id
+			FROM action_versions av
+			GROUP BY av.action_id
+		)
+		SELECT
+			a.id,
+			ac."actionType",
+			ac."actionSettings",
+			ac."coolDown"
+		FROM campaign_last_versions clv
+		JOIN campaign_version_actions cva ON cva.version_id = clv.version_id
+		JOIN actions a ON a.id = cva.action_id
+		JOIN latest_av lav ON lav.action_id = a.id
+		JOIN action_versions av ON av.id = lav.max_id
+		JOIN action_configs ac ON ac.id = av.config_id
+		WHERE clv.campaign_id = ?
+		ORDER BY a."startAt", a.id
+	`, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("select campaign actions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CampaignActionRow
+	for rows.Next() {
+		var (
+			actionID   int64
+			actionType string
+			settings   sql.NullString
+			coolDownMs sql.NullInt64
+		)
+		if err := rows.Scan(&actionID, &actionType, &settings, &coolDownMs); err != nil {
+			return nil, fmt.Errorf("scan campaign action: %w", err)
+		}
+
+		row := CampaignActionRow{Type: actionType}
+		if coolDownMs.Valid {
+			v := coolDownMs.Int64
+			row.CoolDownMs = &v
+		}
+		if settings.Valid {
+			if tpl, ex, ok := RenderMessage(settings.String); ok {
+				row.Body = &tpl
+				row.Example = &ex
+			}
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 // ReadAccountOwner pulls the LH login's LinkedIn identity from `li_accounts`,
 // best-effort. `li_accounts` is keyed by `id`; the user-facing login is row 1
 // in every LH partition we've seen.

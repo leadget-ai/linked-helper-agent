@@ -53,10 +53,19 @@ type RegisterAccount struct {
 	Avatar     *string `json:"avatar,omitempty"`
 }
 
-// CampaignAction is a single workflow step from the lh.db actions table.
+// CampaignAction is one workflow step from lh.db. For messaging actions
+// (MessageToPerson / InvitePerson) Body holds the message template with
+// {var} placeholders intact and Example holds the same template with
+// sample values substituted. Delay (taken from a preceding Waiter step)
+// describes the wait that fires this action. Non-messaging actions ship
+// with Body=Example=nil and tell the platform the step exists without
+// trying to mirror its content.
 type CampaignAction struct {
-	Type string  `json:"type"`
-	Body *string `json:"body"`
+	Type       string  `json:"type"`
+	Body       *string `json:"body"`
+	Example    *string `json:"example"`
+	DelayValue *int    `json:"delayValue,omitempty"`
+	DelayUnit  *string `json:"delayUnit,omitempty"` // "MINUTES" | "HOURS" | "DAYS"
 }
 
 // RegisterCampaign is sent once per LH campaign the agent has just

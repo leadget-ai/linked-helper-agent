@@ -189,7 +189,25 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 
 	owner, _ := a.reader.ReadAccountOwner(accCtx, acc.DBPath)
 
-	req := a.buildReport(acc.ID, campaigns, funnels, owner)
+	// Preload step definitions only for campaigns whose version differs from
+	// the platform's known version — steady-state cycles do zero extra IO.
+	actionsByCampaign := make(map[int64][]lh.CampaignActionRow)
+	for _, c := range campaigns {
+		if a.known.hasCampaignAtVersion(acc.ID, int(c.ID), c.Version) {
+			continue
+		}
+		rows, err := a.reader.ReadCampaignActions(accCtx, acc.DBPath, c.ID)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"accountId":  acc.ID,
+				"campaignId": c.ID,
+			}).Warn("read campaign actions failed, sending campaign without messages")
+			continue
+		}
+		actionsByCampaign[c.ID] = rows
+	}
+
+	req := a.buildReport(acc.ID, campaigns, funnels, owner, actionsByCampaign)
 	if req == nil {
 		// Partition is empty and not yet known to the platform — nothing to
 		// send. The next cycle will check again.
@@ -229,6 +247,7 @@ func (a *Agent) buildReport(
 	campaigns []lh.Campaign,
 	funnels map[int64]lh.Funnel,
 	owner *lh.AccountOwner,
+	actionsByCampaign map[int64][]lh.CampaignActionRow,
 ) *client.AccountReportRequest {
 	req := &client.AccountReportRequest{
 		SyncedAt:          time.Now().UTC().Format(time.RFC3339),
@@ -277,12 +296,7 @@ func (a *Agent) buildReport(
 				IsArchived:  c.IsArchived,
 				CreatedAt:   c.CreatedAt,
 				Version:     c.Version,
-				// V1: workflow step definitions aren't reverse-engineered from
-				// the `actions` table yet. Empty here means the platform will
-				// create the Campaign row without messages — they were already
-				// authored at CSV-export time when the user provisioned the
-				// campaign through the platform UI.
-				Actions: []client.CampaignAction{},
+				Actions:     buildActions(actionsByCampaign[c.ID]),
 			})
 		}
 
@@ -315,6 +329,47 @@ func (a *Agent) setReportInterval(d time.Duration) {
 	a.mu.Lock()
 	a.reportInterval = clamped
 	a.mu.Unlock()
+}
+
+// buildActions maps LH action rows to the wire format. CoolDown (ms) is
+// folded into delayValue/delayUnit so the platform can render the cadence
+// even when LH has no explicit Waiter step between actions. We round to the
+// next-larger unit so a 60_000ms cooldown reads as "1 minute" rather than
+// "60000 milliseconds".
+func buildActions(rows []lh.CampaignActionRow) []client.CampaignAction {
+	out := make([]client.CampaignAction, 0, len(rows))
+	for _, r := range rows {
+		a := client.CampaignAction{
+			Type:    r.Type,
+			Body:    r.Body,
+			Example: r.Example,
+		}
+		if r.CoolDownMs != nil && *r.CoolDownMs > 0 {
+			v, u := coolDownToDelay(*r.CoolDownMs)
+			a.DelayValue = &v
+			a.DelayUnit = &u
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func coolDownToDelay(ms int64) (int, string) {
+	const (
+		minuteMs = int64(60_000)
+		hourMs   = int64(60 * 60_000)
+		dayMs    = int64(24 * 60 * 60_000)
+	)
+	switch {
+	case ms >= dayMs && ms%dayMs == 0:
+		return int(ms / dayMs), "DAYS"
+	case ms >= hourMs && ms%hourMs == 0:
+		return int(ms / hourMs), "HOURS"
+	default:
+		// Round up so sub-minute cooldowns don't degrade to "0 minutes".
+		v := (ms + minuteMs - 1) / minuteMs
+		return int(v), "MINUTES"
+	}
 }
 
 // hasOwnerSignal returns true when the LH owner row carried at least one
