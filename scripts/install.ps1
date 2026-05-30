@@ -40,14 +40,22 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir     | Out-Null
 
 # 2. Read existing service env (on upgrade) BEFORE we tear the service down, so
-#    we don't re-ask for settings the operator already supplied.
+#    we don't re-ask for settings the operator already supplied. We use an
+#    explicit [regex] object instead of the -match automatic $matches variable
+#    because the latter has had scope-related surprises under `irm | iex` —
+#    enumerating Groups directly is bulletproof.
 $existingEnv = @{}
 if (Test-Path $SvcRegKey) {
   $raw = (Get-ItemProperty -Path $SvcRegKey -Name Environment -ErrorAction SilentlyContinue).Environment
-  foreach ($line in $raw) {
-    if ($line -match '^([^=]+)=(.*)$') { $existingEnv[$matches[1]] = $matches[2] }
+  $envRe = [regex]'^([^=]+)=(.*)$'
+  foreach ($line in @($raw)) {
+    $m = $envRe.Match([string]$line)
+    if ($m.Success) {
+      $existingEnv[$m.Groups[1].Value] = $m.Groups[2].Value
+    }
   }
 }
+Write-Step ("Loaded {0} existing env var(s): {1}" -f $existingEnv.Count, ($existingEnv.Keys -join ', '))
 
 # 3. Stop and remove any existing registration so we can drop a fresh binary
 #    and re-create the service cleanly (avoids stale binPath / locked file).
