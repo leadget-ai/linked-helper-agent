@@ -6,6 +6,12 @@ package client
 // startup; the response carries the cadence the agent should run at AND the
 // seed known-state snapshot the agent diffs against on the first cycle.
 type BootstrapRequest struct {
+	// Persistent UUID generated on first run and stored in the agent's data
+	// dir (ProgramData on Windows, ~/Library/Application Support on macOS,
+	// ~/.config on Linux). Survives sc.exe delete + reinstall, so the
+	// platform can dedupe agents[] entries reliably even when hostname or
+	// IP change.
+	AgentID         string `json:"agentId,omitempty"`
 	AgentVersion    string `json:"agentVersion"`
 	Hostname        string `json:"hostname"`
 	OS              string `json:"os"`
@@ -108,6 +114,11 @@ type CampaignFunnel struct {
 // "register" blocks are optional/empty on steady-state cycles; funnels are
 // always present.
 type AccountReportRequest struct {
+	// Same persistent UUID as BootstrapRequest.AgentID — included on every
+	// cycle so the platform can refresh agents[].lastSeenAt / lastSeenIp
+	// between bootstraps (bootstrap fires on agent restart, reports every
+	// ~10 minutes).
+	AgentID           string             `json:"agentId,omitempty"`
 	SyncedAt          string             `json:"syncedAt"`
 	RegisterAccount   *RegisterAccount   `json:"registerAccount,omitempty"`
 	RegisterCampaigns []RegisterCampaign `json:"registerCampaigns"`

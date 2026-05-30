@@ -32,18 +32,26 @@ type Agent struct {
 	reader  *lh.Reader
 	known   *known
 	version string
+	// Persistent install id (UUID), read once at startup. Empty when the
+	// data dir is unwritable — platform falls back to hostname matching.
+	agentID string
 
 	mu             sync.RWMutex
 	reportInterval time.Duration
 }
 
 func New(cfg *Config, version string) *Agent {
+	id, err := LoadOrCreateAgentID()
+	if err != nil {
+		log.WithError(err).Warn("agent id init failed; platform will match by hostname")
+	}
 	return &Agent{
 		cfg:            cfg,
 		client:         client.New(cfg.APIEndpoint, cfg.APIKey, cfg.DisableKeepAlive),
 		reader:         lh.NewReader(),
 		known:          newKnown(),
 		version:        version,
+		agentID:        id,
 		reportInterval: defaultReportInterval,
 	}
 }
@@ -99,6 +107,7 @@ func (a *Agent) bootstrap(ctx context.Context) {
 	}
 
 	resp, err := a.client.Bootstrap(ctx, &client.BootstrapRequest{
+		AgentID:         a.agentID,
 		AgentVersion:    a.version,
 		Hostname:        hostname,
 		OS:              runtime.GOOS,
@@ -112,6 +121,7 @@ func (a *Agent) bootstrap(ctx context.Context) {
 	a.setReportInterval(time.Duration(resp.ReportInterval) * time.Second)
 	a.known.replace(resp.KnownState)
 	log.WithFields(log.Fields{
+		"agentId":        a.agentID,
 		"integrationId":  resp.IntegrationID,
 		"reportInterval": resp.ReportInterval,
 		"enabled":        resp.Enabled,
@@ -255,6 +265,7 @@ func (a *Agent) buildReport(
 	limits lh.DailyLimits,
 ) *client.AccountReportRequest {
 	req := &client.AccountReportRequest{
+		AgentID:           a.agentID,
 		SyncedAt:          time.Now().UTC().Format(time.RFC3339),
 		RegisterCampaigns: []client.RegisterCampaign{},
 		Funnels:           make([]client.CampaignFunnel, 0, len(campaigns)),
