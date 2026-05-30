@@ -189,6 +189,10 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 
 	owner, _ := a.reader.ReadAccountOwner(accCtx, acc.DBPath)
 
+	// One read per cycle — used to pick the per-day cap for every campaign
+	// without re-querying the limits tables per campaign.
+	limits, _ := a.reader.ReadDailyLimits(accCtx, acc.DBPath)
+
 	// Preload step definitions only for campaigns whose version differs from
 	// the platform's known version — steady-state cycles do zero extra IO.
 	actionsByCampaign := make(map[int64][]lh.CampaignActionRow)
@@ -207,7 +211,7 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 		actionsByCampaign[c.ID] = rows
 	}
 
-	req := a.buildReport(acc.ID, campaigns, funnels, owner, actionsByCampaign)
+	req := a.buildReport(acc.ID, campaigns, funnels, owner, actionsByCampaign, limits)
 	if req == nil {
 		// Partition is empty and not yet known to the platform — nothing to
 		// send. The next cycle will check again.
@@ -248,6 +252,7 @@ func (a *Agent) buildReport(
 	funnels map[int64]lh.Funnel,
 	owner *lh.AccountOwner,
 	actionsByCampaign map[int64][]lh.CampaignActionRow,
+	limits lh.DailyLimits,
 ) *client.AccountReportRequest {
 	req := &client.AccountReportRequest{
 		SyncedAt:          time.Now().UTC().Format(time.RFC3339),
@@ -287,16 +292,18 @@ func (a *Agent) buildReport(
 		// pins to (accountId, campaignId, version) so renames / pause toggles
 		// / step edits propagate to the platform automatically.
 		if !a.known.hasCampaignAtVersion(accountID, cid, c.Version) {
+			actions := actionsByCampaign[c.ID]
 			req.RegisterCampaigns = append(req.RegisterCampaigns, client.RegisterCampaign{
-				CampaignID:  cid,
-				Name:        c.Name,
-				Description: c.Description,
-				Type:        c.Type,
-				IsPaused:    c.IsPaused,
-				IsArchived:  c.IsArchived,
-				CreatedAt:   c.CreatedAt,
-				Version:     c.Version,
-				Actions:     buildActions(actionsByCampaign[c.ID]),
+				CampaignID:     cid,
+				Name:           c.Name,
+				Description:    c.Description,
+				Type:           c.Type,
+				IsPaused:       c.IsPaused,
+				IsArchived:     c.IsArchived,
+				CreatedAt:      c.CreatedAt,
+				Version:        c.Version,
+				MessagesPerDay: limits.MessagesPerDayFor(actions),
+				Actions:        buildActions(actions),
 			})
 		}
 
@@ -306,6 +313,8 @@ func (a *Agent) buildReport(
 			Messaged:   f.Messaged,
 			Replied:    f.Replied,
 			Target:     f.Target,
+			IsPaused:   c.IsPaused,
+			IsArchived: c.IsArchived,
 		})
 	}
 

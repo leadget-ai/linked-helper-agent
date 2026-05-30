@@ -242,6 +242,80 @@ func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaig
 	return out, rows.Err()
 }
 
+// DailyLimits holds the per-day send caps the LH account is configured with.
+// General is daily_limits.max_limit (the global per-day ceiling). Invite is
+// the Invite limit_type cap; Message is the general cap (LH has no plain
+// MessageToPerson per-action cap row in normal installs, so message-only
+// campaigns are bound by General). Zero means "no cap configured / unknown".
+type DailyLimits struct {
+	General int
+	Invite  int
+}
+
+// ReadDailyLimits pulls the per-day caps for this LH login. We hit two
+// tables: daily_limits.max_limit (global) and limit_type_period_max_credits
+// joined to limit_types.type='Invite' (per-action). Both queries are tiny
+// and run once per cycle per account, so the cost is negligible.
+func (r *Reader) ReadDailyLimits(ctx context.Context, dbPath string) (DailyLimits, error) {
+	db, err := r.open(dbPath)
+	if err != nil {
+		return DailyLimits{}, err
+	}
+
+	var out DailyLimits
+
+	row := db.QueryRowContext(ctx, `SELECT max_limit FROM daily_limits WHERE li_account_id = 1`)
+	var general sql.NullInt64
+	if err := row.Scan(&general); err == nil && general.Valid {
+		out.General = int(general.Int64)
+	}
+
+	row = db.QueryRowContext(ctx, `
+		SELECT max_credits
+		FROM limit_type_period_max_credits lp
+		JOIN limit_types lt ON lt.id = lp.limit_type_id
+		WHERE lp.li_account_id = 1
+		  AND lp.is_deleted = 0
+		  AND lp.period = 86400
+		  AND lt.type = 'Invite'
+		ORDER BY lp.id DESC
+		LIMIT 1
+	`)
+	var invite sql.NullInt64
+	if err := row.Scan(&invite); err == nil && invite.Valid {
+		out.Invite = int(invite.Int64)
+	}
+
+	return out, nil
+}
+
+// MessagesPerDayFor picks the right per-day cap for a campaign based on its
+// first messaging action. Connection campaigns (InvitePerson) are throttled
+// by the Invite limit; everything else is throttled by the global daily cap.
+// Returns nil when we can't pick a meaningful number — caller serialises that
+// as a null on the wire so the platform won't render a bogus forecast.
+func (d DailyLimits) MessagesPerDayFor(actions []CampaignActionRow) *int {
+	for _, a := range actions {
+		switch a.Type {
+		case "InvitePerson":
+			if d.Invite > 0 {
+				v := d.Invite
+				return &v
+			}
+		case "MessageToPerson":
+			if d.General > 0 {
+				v := d.General
+				return &v
+			}
+		}
+	}
+	if d.General > 0 {
+		v := d.General
+		return &v
+	}
+	return nil
+}
+
 // ReadAccountOwner pulls the LH login's LinkedIn identity from `li_accounts`,
 // best-effort. `li_accounts` is keyed by `id`; the user-facing login is row 1
 // in every LH partition we've seen.

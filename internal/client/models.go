@@ -81,17 +81,27 @@ type RegisterCampaign struct {
 	// LH campaign_last_versions.version_id at the moment of send. Echoed
 	// back in knownState so future cycles can short-circuit unchanged
 	// campaigns.
-	Version int              `json:"version"`
-	Actions []CampaignAction `json:"actions"`
+	Version int `json:"version"`
+	// Per-day send cap for this campaign — picked from LH's limit_types
+	// (Invite for connection campaigns) or daily_limits.max_limit (global)
+	// based on the first messaging action. Nil when LH had no usable cap;
+	// the platform skips the end-date forecast in that case.
+	MessagesPerDay *int             `json:"messagesPerDay,omitempty"`
+	Actions        []CampaignAction `json:"actions"`
 }
 
 // CampaignFunnel carries the volatile counters that always overwrite the
-// platform-side values.
+// platform-side values. IsPaused/IsArchived ride along on every cycle so
+// the platform can flip status without re-firing registerCampaign — LH
+// pause/archive don't bump campaign_last_versions.version_id, so the
+// version-gated upsert path would otherwise miss those transitions.
 type CampaignFunnel struct {
-	CampaignID int `json:"campaignId"`
-	Messaged   int `json:"messaged"`
-	Replied    int `json:"replied"`
-	Target     int `json:"target"`
+	CampaignID int  `json:"campaignId"`
+	Messaged   int  `json:"messaged"`
+	Replied    int  `json:"replied"`
+	Target     int  `json:"target"`
+	IsPaused   bool `json:"isPaused"`
+	IsArchived bool `json:"isArchived"`
 }
 
 // AccountReportRequest is the per-account batch sent every cycle. The
