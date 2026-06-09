@@ -203,22 +203,28 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 	// without re-querying the limits tables per campaign.
 	limits, _ := a.reader.ReadDailyLimits(accCtx, acc.DBPath)
 
-	// Classify every campaign (inmail / regular / scraper) from its action
-	// types — cheap, and needed for ALL campaigns so scrapers are dropped from
-	// both register and funnel. A read failure defaults to regular so we never
+	// One pass per campaign over its step stats: classifies the campaign
+	// (inmail / regular / scraper, so scrapers are dropped) AND builds the
+	// per-message funnel. A read failure defaults to regular so we never
 	// silently lose a real outreach campaign.
 	kindByCampaign := make(map[int64]string, len(campaigns))
+	stepsByCampaign := make(map[int64][]client.FunnelStep, len(campaigns))
 	for _, c := range campaigns {
-		types, err := a.reader.ReadCampaignActionTypes(accCtx, acc.DBPath, c.ID)
+		steps, err := a.reader.ReadCampaignStepStats(accCtx, acc.DBPath, c.ID)
 		if err != nil {
 			log.WithError(err).WithFields(log.Fields{
 				"accountId":  acc.ID,
 				"campaignId": c.ID,
-			}).Warn("classify campaign failed, treating as regular")
+			}).Warn("read step stats failed, treating as regular")
 			kindByCampaign[c.ID] = lh.KindRegular
 			continue
 		}
+		types := make([]string, 0, len(steps))
+		for _, s := range steps {
+			types = append(types, s.Type)
+		}
 		kindByCampaign[c.ID] = lh.ClassifyLinkedinKind(types)
+		stepsByCampaign[c.ID] = buildFunnelSteps(steps)
 	}
 
 	// Preload step definitions only for non-scraper campaigns the platform
@@ -242,7 +248,7 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 		actionsByCampaign[c.ID] = rows
 	}
 
-	req := a.buildReport(acc.ID, campaigns, funnels, owner, actionsByCampaign, kindByCampaign, limits)
+	req := a.buildReport(acc.ID, campaigns, funnels, owner, actionsByCampaign, kindByCampaign, stepsByCampaign, limits)
 	if req == nil {
 		// Partition is empty and not yet known to the platform — nothing to
 		// send. The next cycle will check again.
@@ -284,6 +290,7 @@ func (a *Agent) buildReport(
 	owner *lh.AccountOwner,
 	actionsByCampaign map[int64][]lh.CampaignActionRow,
 	kindByCampaign map[int64]string,
+	stepsByCampaign map[int64][]client.FunnelStep,
 	limits lh.DailyLimits,
 ) *client.AccountReportRequest {
 	req := &client.AccountReportRequest{
@@ -365,6 +372,8 @@ func (a *Agent) buildReport(
 			IsPaused:       c.IsPaused,
 			IsArchived:     c.IsArchived,
 			LastActivityAt: f.LastActivityAt,
+			LinkedinKind:   kindByCampaign[c.ID],
+			Steps:          stepsByCampaign[c.ID],
 		})
 	}
 
@@ -411,6 +420,27 @@ func hasMessageActions(rows []lh.CampaignActionRow) bool {
 		}
 	}
 	return false
+}
+
+// buildFunnelSteps turns per-action stats (workflow order) into per-message
+// funnel rows. Seq numbering matches buildActions / the platform: one bump per
+// messaging step. A messaging step's own replied is kept, and any following
+// CheckForReplies' replied is folded onto it — LH records the reply on the
+// check step that gates the next message, not on the message itself.
+func buildFunnelSteps(steps []lh.StepStat) []client.FunnelStep {
+	var out []client.FunnelStep
+	seq := 0
+	lastMsgIdx := -1
+	for _, s := range steps {
+		if _, isMessage := messageActionTypes[s.Type]; isMessage {
+			seq++
+			out = append(out, client.FunnelStep{SeqNumber: seq, Sent: s.Sent, Replied: s.Replied})
+			lastMsgIdx = len(out) - 1
+		} else if lastMsgIdx >= 0 && s.Replied > 0 {
+			out[lastMsgIdx].Replied += s.Replied
+		}
+	}
+	return out
 }
 
 // buildActions maps LH action rows to the wire format, walking them in

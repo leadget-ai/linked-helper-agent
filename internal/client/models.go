@@ -122,6 +122,21 @@ type CampaignFunnel struct {
 	// Most recent action-result time in the campaign; the platform stamps it as
 	// the end date for terminal campaigns. Nil when nothing has run.
 	LastActivityAt *string `json:"lastActivityAt,omitempty"`
+	// Campaign kind ("inmail" / "regular"), sent every cycle so the platform can
+	// backfill it onto campaigns registered before the kind field existed.
+	LinkedinKind string `json:"linkedinKind"`
+	// Per-message engagement, one entry per messaging step (seq numbering matches
+	// the platform's CampaignMessage rows). Lets the platform fill per-message
+	// sent/replied, which the campaign-level counters can't.
+	Steps []FunnelStep `json:"steps"`
+}
+
+// FunnelStep is one messaging step's sent/replied, keyed by the same seq number
+// the platform assigns to its CampaignMessage rows.
+type FunnelStep struct {
+	SeqNumber int `json:"seqNumber"`
+	Sent      int `json:"sent"`
+	Replied   int `json:"replied"`
 }
 
 // AccountReportRequest is the per-account batch sent every cycle. The

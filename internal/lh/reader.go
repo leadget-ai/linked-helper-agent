@@ -259,6 +259,65 @@ func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaig
 	return out, rows.Err()
 }
 
+// StepStat is one workflow step's engagement, in workflow (cva.id) order.
+// Sent counts people the step actually processed; Replied counts people who
+// replied. LH records a reply on the CheckForReplies step that FOLLOWS a
+// message, not on the message itself — the caller folds each CheckForReplies'
+// Replied back onto the preceding messaging step (mirror of how WaitMs folds
+// forward).
+type StepStat struct {
+	Type    string
+	Sent    int
+	Replied int
+}
+
+// ReadCampaignStepStats returns per-action sent/replied counts for a campaign
+// in workflow order. One GROUP BY over person_in_campaigns_history joined to
+// the campaign's current-version actions — used both to classify the campaign
+// and to build the per-step funnel every cycle.
+func (r *Reader) ReadCampaignStepStats(ctx context.Context, dbPath string, campaignID int64) ([]StepStat, error) {
+	db, err := r.open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			ac."actionType",
+			COUNT(DISTINCT CASE WHEN pich.result_status != -999 THEN pich.person_id END) AS sent,
+			COUNT(DISTINCT CASE
+				WHEN pich.result_status = 2 OR pich.result_flag_recipient_replied = 1
+				THEN pich.person_id
+			END) AS replied
+		FROM campaign_last_versions clv
+		JOIN campaign_version_actions cva ON cva.version_id = clv.version_id
+		JOIN actions a ON a.id = cva.action_id
+		JOIN action_configs ac ON ac.id = (
+			SELECT av.config_id FROM action_versions av
+			WHERE av.action_id = a.id ORDER BY av.id DESC LIMIT 1
+		)
+		LEFT JOIN person_in_campaigns_history pich
+			ON pich.action_id = a.id AND pich.campaign_id = clv.campaign_id
+		WHERE clv.campaign_id = ?
+		GROUP BY cva.id, ac."actionType"
+		ORDER BY cva.id
+	`, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("select campaign step stats: %w", err)
+	}
+	defer rows.Close()
+
+	var out []StepStat
+	for rows.Next() {
+		var s StepStat
+		if err := rows.Scan(&s.Type, &s.Sent, &s.Replied); err != nil {
+			return nil, fmt.Errorf("scan step stat: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // LinkedinKind values mirror the platform's ELinkedinCampaignKind. Scraper
 // campaigns are classified so the agent can drop them before sending.
 const (
@@ -287,40 +346,6 @@ func ClassifyLinkedinKind(actionTypes []string) string {
 		return KindRegular
 	}
 	return KindScraper
-}
-
-// ReadCampaignActionTypes returns the distinct action types in a campaign's
-// current version — enough to classify the campaign (inmail / regular /
-// scraper) without rendering every template. Cheaper than ReadCampaignActions,
-// so the agent can classify all campaigns each cycle to decide which to skip.
-func (r *Reader) ReadCampaignActionTypes(ctx context.Context, dbPath string, campaignID int64) ([]string, error) {
-	db, err := r.open(dbPath)
-	if err != nil {
-		return nil, err
-	}
-
-	rows, err := db.QueryContext(ctx, `
-		SELECT DISTINCT ac."actionType"
-		FROM campaign_last_versions clv
-		JOIN campaign_version_actions cva ON cva.version_id = clv.version_id
-		JOIN action_versions av ON av.action_id = cva.action_id
-		JOIN action_configs ac ON ac.id = av.config_id
-		WHERE clv.campaign_id = ?
-	`, campaignID)
-	if err != nil {
-		return nil, fmt.Errorf("select campaign action types: %w", err)
-	}
-	defer rows.Close()
-
-	var out []string
-	for rows.Next() {
-		var t string
-		if err := rows.Scan(&t); err != nil {
-			return nil, fmt.Errorf("scan action type: %w", err)
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
 }
 
 // DailyLimits holds the per-day send caps the LH account is configured with.
