@@ -16,11 +16,20 @@ import (
 type known struct {
 	mu       sync.RWMutex
 	accounts map[int]struct{}
-	// Value is the version the platform last accepted for this campaign.
-	// Agent re-registers when its current LH version_id differs (covers
-	// rename / pause toggle / step edits — knownState would otherwise pin
-	// the platform to the first-seen snapshot forever).
-	campaigns map[campaignKey]int
+	// Value is the platform's last-accepted state for this campaign. Agent
+	// re-registers when its current LH version_id differs (covers rename /
+	// pause toggle / step edits — knownState would otherwise pin the platform
+	// to the first-seen snapshot forever) OR when the platform has no messages
+	// for the campaign yet (backfill path — version alone never changes for an
+	// untouched campaign, so message-less campaigns would never recover).
+	campaigns map[campaignKey]knownCampaign
+}
+
+// knownCampaign is the platform's accepted state for one campaign, mirrored
+// from knownState so the agent can decide whether to re-send it.
+type knownCampaign struct {
+	Version     int
+	HasMessages bool
 }
 
 // campaignKey deduplicates the (accountId, campaignId) tuple — the platform
@@ -34,7 +43,7 @@ type campaignKey struct {
 func newKnown() *known {
 	return &known{
 		accounts:  make(map[int]struct{}),
-		campaigns: make(map[campaignKey]int),
+		campaigns: make(map[campaignKey]knownCampaign),
 	}
 }
 
@@ -46,9 +55,12 @@ func (k *known) replace(s client.KnownState) {
 	for _, id := range s.Accounts {
 		accounts[id] = struct{}{}
 	}
-	campaigns := make(map[campaignKey]int, len(s.Campaigns))
+	campaigns := make(map[campaignKey]knownCampaign, len(s.Campaigns))
 	for _, c := range s.Campaigns {
-		campaigns[campaignKey{c.AccountID, c.CampaignID}] = c.Version
+		campaigns[campaignKey{c.AccountID, c.CampaignID}] = knownCampaign{
+			Version:     c.Version,
+			HasMessages: c.HasMessages,
+		}
 	}
 
 	k.mu.Lock()
@@ -64,12 +76,29 @@ func (k *known) hasAccount(accountID int) bool {
 	return ok
 }
 
-// hasCampaignAtVersion is true only when the platform has this campaign AND
-// its accepted version matches what the agent is about to send. Mismatches
-// (or unknown campaigns) trigger a full registerCampaign so updates propagate.
-func (k *known) hasCampaignAtVersion(accountID, campaignID, version int) bool {
+// needsRegister reports whether the agent should (re)send a campaign's full
+// registerCampaign payload this cycle. True when the platform doesn't know the
+// campaign, when its accepted version differs from the live LH version (rename
+// / pause toggle / step edit), or when the platform has it but holds no
+// messages for it yet (backfill — an untouched campaign's version never moves,
+// so message-less campaigns would otherwise never recover).
+func (k *known) needsRegister(accountID, campaignID, version int) bool {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
-	v, ok := k.campaigns[campaignKey{accountID, campaignID}]
-	return ok && v == version
+	c, ok := k.campaigns[campaignKey{accountID, campaignID}]
+	if !ok {
+		return true
+	}
+	return c.Version != version || !c.HasMessages
+}
+
+// lookup returns the platform's accepted state for a campaign and whether it's
+// known at all. Callers use it to tell apart the two reasons needsRegister
+// fires (version change vs missing messages), since the missing-messages path
+// must additionally check the agent actually has messages to send.
+func (k *known) lookup(accountID, campaignID int) (knownCampaign, bool) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	c, ok := k.campaigns[campaignKey{accountID, campaignID}]
+	return c, ok
 }

@@ -207,7 +207,7 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 	// the platform's known version — steady-state cycles do zero extra IO.
 	actionsByCampaign := make(map[int64][]lh.CampaignActionRow)
 	for _, c := range campaigns {
-		if a.known.hasCampaignAtVersion(acc.ID, int(c.ID), c.Version) {
+		if !a.known.needsRegister(acc.ID, int(c.ID), c.Version) {
 			continue
 		}
 		rows, err := a.reader.ReadCampaignActions(accCtx, acc.DBPath, c.ID)
@@ -299,11 +299,19 @@ func (a *Agent) buildReport(
 	for _, c := range campaigns {
 		cid := int(c.ID)
 
-		// Re-register on first sight AND on any LH version bump — knownState
-		// pins to (accountId, campaignId, version) so renames / pause toggles
-		// / step edits propagate to the platform automatically.
-		if !a.known.hasCampaignAtVersion(accountID, cid, c.Version) {
-			actions := actionsByCampaign[c.ID]
+		// Decide whether to (re)send the full campaign metadata this cycle:
+		//   - unknown or version bump (rename / pause toggle / step edit) →
+		//     always re-register;
+		//   - known at the same version but the platform has no messages →
+		//     backfill, BUT only when we actually have message-bearing actions
+		//     to contribute. A campaign with no messageable steps (e.g. a
+		//     note-less InvitePerson) would otherwise never reach hasMessages
+		//     and we'd resend it every cycle forever.
+		kc, isKnown := a.known.lookup(accountID, cid)
+		versionChanged := !isKnown || kc.Version != c.Version
+		actions := actionsByCampaign[c.ID]
+		needsBackfill := isKnown && !kc.HasMessages && hasMessageActions(actions)
+		if versionChanged || needsBackfill {
 			req.RegisterCampaigns = append(req.RegisterCampaigns, client.RegisterCampaign{
 				CampaignID:     cid,
 				Name:           c.Name,
@@ -351,30 +359,60 @@ func (a *Agent) setReportInterval(d time.Duration) {
 	a.mu.Unlock()
 }
 
-// buildActions maps LH action rows to the wire format. CoolDown (ms) is
-// folded into delayValue/delayUnit so the platform can render the cadence
-// even when LH has no explicit Waiter step between actions. We round to the
-// next-larger unit so a 60_000ms cooldown reads as "1 minute" rather than
-// "60000 milliseconds".
+// messageActionTypes mirrors the platform's MESSAGE_ACTION_TYPES — the steps
+// that become CampaignMessage rows and carry a seq number. Inter-message
+// waits live on the non-message steps between them (CheckForReplies), so we
+// accumulate those and attach them to the next message action.
+var messageActionTypes = map[string]struct{}{
+	"MessageToPerson": {},
+	"InvitePerson":    {},
+}
+
+// hasMessageActions reports whether any step would become a CampaignMessage on
+// the platform — same predicate the platform's syncMessages uses (messaging
+// type AND a rendered body). Gates the message-backfill so we don't perpetually
+// re-register campaigns that have no messageable steps to begin with.
+func hasMessageActions(rows []lh.CampaignActionRow) bool {
+	for _, r := range rows {
+		if _, ok := messageActionTypes[r.Type]; ok && r.Body != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// buildActions maps LH action rows to the wire format, walking them in
+// workflow order. LH encodes the wait between two messages as a separate step
+// (CheckForReplies.moveToSuccessfulAfterMs) sitting between them, so we carry
+// the accumulated wait forward and stamp it as the delay BEFORE the next
+// messaging action. action_configs.coolDown is deliberately ignored: it's a
+// fixed per-dispatch throttle (~60s for every send), not the sequence cadence,
+// and folding it in made every message read as "+1 minute".
 func buildActions(rows []lh.CampaignActionRow) []client.CampaignAction {
 	out := make([]client.CampaignAction, 0, len(rows))
+	var pendingWaitMs int64
 	for _, r := range rows {
 		a := client.CampaignAction{
 			Type:    r.Type,
 			Body:    r.Body,
 			Example: r.Example,
 		}
-		if r.CoolDownMs != nil && *r.CoolDownMs > 0 {
-			v, u := coolDownToDelay(*r.CoolDownMs)
-			a.DelayValue = &v
-			a.DelayUnit = &u
+		if _, isMessage := messageActionTypes[r.Type]; isMessage {
+			if pendingWaitMs > 0 {
+				v, u := waitToDelay(pendingWaitMs)
+				a.DelayValue = &v
+				a.DelayUnit = &u
+			}
+			pendingWaitMs = 0
+		} else if r.WaitMs != nil && *r.WaitMs > 0 {
+			pendingWaitMs += *r.WaitMs
 		}
 		out = append(out, a)
 	}
 	return out
 }
 
-func coolDownToDelay(ms int64) (int, string) {
+func waitToDelay(ms int64) (int, string) {
 	const (
 		minuteMs = int64(60_000)
 		hourMs   = int64(60 * 60_000)
@@ -386,7 +424,7 @@ func coolDownToDelay(ms int64) (int, string) {
 	case ms >= hourMs && ms%hourMs == 0:
 		return int(ms / hourMs), "HOURS"
 	default:
-		// Round up so sub-minute cooldowns don't degrade to "0 minutes".
+		// Round up so sub-minute waits don't degrade to "0 minutes".
 		v := (ms + minuteMs - 1) / minuteMs
 		return int(v), "MINUTES"
 	}

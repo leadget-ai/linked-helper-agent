@@ -58,6 +58,27 @@ func RenderMessage(actionSettingsJSON string) (template, example string, ok bool
 	return template, example, true
 }
 
+// parseWaitMs extracts actionSettings.moveToSuccessfulAfterMs — the time LH
+// waits at a CheckForReplies step before advancing a person to the next
+// workflow action. This is the real inter-message interval (e.g. 345600000ms
+// = 4 days). Returns (0, false) when the field is absent or the JSON is
+// malformed, so the caller treats the step as imposing no wait.
+func parseWaitMs(actionSettingsJSON string) (int64, bool) {
+	if actionSettingsJSON == "" {
+		return 0, false
+	}
+	var s struct {
+		MoveToSuccessfulAfterMs *int64 `json:"moveToSuccessfulAfterMs"`
+	}
+	if err := json.Unmarshal([]byte(actionSettingsJSON), &s); err != nil {
+		return 0, false
+	}
+	if s.MoveToSuccessfulAfterMs == nil || *s.MoveToSuccessfulAfterMs <= 0 {
+		return 0, false
+	}
+	return *s.MoveToSuccessfulAfterMs, true
+}
+
 // node mirrors the recursive shape of the LH template tree. All fields are
 // optional and only populated for their matching `type`.
 type node struct {

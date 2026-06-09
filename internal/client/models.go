@@ -41,6 +41,11 @@ type KnownCampaign struct {
 	// renames / pause toggles / step edits propagate. 0 = pre-versioning row
 	// → unconditional re-register on the next cycle.
 	Version int `json:"version"`
+	// HasMessages is whether the platform already stored CampaignMessage rows
+	// for this campaign. False forces a re-register even at a matching version
+	// so messages missing on the platform (campaign first synced before message
+	// mirroring, or a one-off action read failure) get backfilled.
+	HasMessages bool `json:"hasMessages"`
 }
 
 // RegisterAccount is sent only the first time an LH accountId is reported.
@@ -62,10 +67,11 @@ type RegisterAccount struct {
 // CampaignAction is one workflow step from lh.db. For messaging actions
 // (MessageToPerson / InvitePerson) Body holds the message template with
 // {var} placeholders intact and Example holds the same template with
-// sample values substituted. Delay (taken from a preceding Waiter step)
-// describes the wait that fires this action. Non-messaging actions ship
-// with Body=Example=nil and tell the platform the step exists without
-// trying to mirror its content.
+// sample values substituted. Delay is the wait BEFORE this action, folded in
+// from the CheckForReplies step(s) that precede it in the sequence (LH stores
+// the inter-message wait as that step's moveToSuccessfulAfterMs). Non-messaging
+// actions ship with Body=Example=nil and tell the platform the step exists
+// without trying to mirror its content.
 type CampaignAction struct {
 	Type       string  `json:"type"`
 	Body       *string `json:"body"`

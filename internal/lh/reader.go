@@ -161,18 +161,22 @@ func (r *Reader) ReadCampaigns(ctx context.Context, dbPath, since string) ([]Cam
 }
 
 // CampaignActionRow is one workflow step joined out of the LH schema. The
-// step "type" lives on action_configs.actionType and the template/cooldown
-// live on action_configs.actionSettings/coolDown. Body/Example are populated
-// only for messaging actions where the template renderer found content.
+// step "type" lives on action_configs.actionType and the template/wait live
+// on action_configs.actionSettings. Body/Example are populated only for
+// messaging actions where the template renderer found content.
 type CampaignActionRow struct {
 	Type    string
 	Body    *string
 	Example *string
-	// CoolDownMs is action_configs.coolDown — milliseconds the LH client
-	// waits after dispatching this action before it picks up the next item.
-	// Stored on the message so the platform UI can hint at cadence, even
-	// when we don't have a preceding Waiter to map to delayValue/Unit.
-	CoolDownMs *int64
+	// WaitMs is how long LH holds a person at this step before advancing them
+	// to the next workflow action. For CheckForReplies steps it's
+	// actionSettings.moveToSuccessfulAfterMs (e.g. "wait 4 days for a reply
+	// before sending the next message"). This — NOT action_configs.coolDown,
+	// which is a fixed per-dispatch throttle — is the real inter-message
+	// interval. The caller folds it onto the delay of the *next* messaging
+	// action, since LH encodes inter-message waits as their own steps. Nil
+	// when the step imposes no wait.
+	WaitMs *int64
 }
 
 // ReadCampaignActions walks campaign → last_version → version_actions →
@@ -189,6 +193,13 @@ func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaig
 	// We join through action_versions to find the latest config per action.
 	// One action may have multiple versions; the highest id wins, mirroring
 	// how LH itself resolves "current settings".
+	//
+	// Order by campaign_version_actions.id, NOT actions.startAt: startAt is a
+	// mutable runtime timestamp (the step's last scheduled execution, which
+	// drifts as the campaign runs and postpones), so ordering by it scrambles
+	// the workflow into execution order. cva rows are inserted in design order
+	// when the current version is built, so cva.id ascending is the true step
+	// sequence.
 	rows, err := db.QueryContext(ctx, `
 		WITH latest_av AS (
 			SELECT av.action_id, MAX(av.id) AS max_id
@@ -198,8 +209,7 @@ func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaig
 		SELECT
 			a.id,
 			ac."actionType",
-			ac."actionSettings",
-			ac."coolDown"
+			ac."actionSettings"
 		FROM campaign_last_versions clv
 		JOIN campaign_version_actions cva ON cva.version_id = clv.version_id
 		JOIN actions a ON a.id = cva.action_id
@@ -207,7 +217,7 @@ func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaig
 		JOIN action_versions av ON av.id = lav.max_id
 		JOIN action_configs ac ON ac.id = av.config_id
 		WHERE clv.campaign_id = ?
-		ORDER BY a."startAt", a.id
+		ORDER BY cva.id
 	`, campaignID)
 	if err != nil {
 		return nil, fmt.Errorf("select campaign actions: %w", err)
@@ -220,21 +230,19 @@ func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaig
 			actionID   int64
 			actionType string
 			settings   sql.NullString
-			coolDownMs sql.NullInt64
 		)
-		if err := rows.Scan(&actionID, &actionType, &settings, &coolDownMs); err != nil {
+		if err := rows.Scan(&actionID, &actionType, &settings); err != nil {
 			return nil, fmt.Errorf("scan campaign action: %w", err)
 		}
 
 		row := CampaignActionRow{Type: actionType}
-		if coolDownMs.Valid {
-			v := coolDownMs.Int64
-			row.CoolDownMs = &v
-		}
 		if settings.Valid {
 			if tpl, ex, ok := RenderMessage(settings.String); ok {
 				row.Body = &tpl
 				row.Example = &ex
+			}
+			if ms, ok := parseWaitMs(settings.String); ok {
+				row.WaitMs = &ms
 			}
 		}
 		out = append(out, row)
