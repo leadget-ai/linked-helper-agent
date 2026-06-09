@@ -58,6 +58,33 @@ func RenderMessage(actionSettingsJSON string) (template, example string, ok bool
 	return template, example, true
 }
 
+// RenderSubject parses an actionSettings.subjectTemplate blob (present on InMail
+// steps) and returns (template, example) strings. The subject tree is rooted at
+// a `group` node — same node shapes as the message body, minus the variants
+// wrapper — so renderNode handles it directly. Returns ("", "", false) when
+// there is no subject (every non-InMail step, and InMail steps with a blank
+// subject).
+func RenderSubject(actionSettingsJSON string) (template, example string, ok bool) {
+	if actionSettingsJSON == "" {
+		return "", "", false
+	}
+	var root struct {
+		SubjectTemplate *node `json:"subjectTemplate"`
+	}
+	if err := json.Unmarshal([]byte(actionSettingsJSON), &root); err != nil {
+		return "", "", false
+	}
+	if root.SubjectTemplate == nil {
+		return "", "", false
+	}
+	template = renderNode(root.SubjectTemplate, true)
+	example = renderNode(root.SubjectTemplate, false)
+	if strings.TrimSpace(template) == "" && strings.TrimSpace(example) == "" {
+		return "", "", false
+	}
+	return template, example, true
+}
+
 // parseWaitMs extracts actionSettings.moveToSuccessfulAfterMs — the time LH
 // waits at a CheckForReplies step before advancing a person to the next
 // workflow action. This is the real inter-message interval (e.g. 345600000ms

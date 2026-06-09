@@ -73,11 +73,13 @@ type RegisterAccount struct {
 // actions ship with Body=Example=nil and tell the platform the step exists
 // without trying to mirror its content.
 type CampaignAction struct {
-	Type       string  `json:"type"`
-	Body       *string `json:"body"`
-	Example    *string `json:"example"`
-	DelayValue *int    `json:"delayValue,omitempty"`
-	DelayUnit  *string `json:"delayUnit,omitempty"` // "MINUTES" | "HOURS" | "DAYS"
+	Type           string  `json:"type"`
+	Body           *string `json:"body"`
+	Example        *string `json:"example"`
+	Subject        *string `json:"subject,omitempty"`
+	ExampleSubject *string `json:"exampleSubject,omitempty"`
+	DelayValue     *int    `json:"delayValue,omitempty"`
+	DelayUnit      *string `json:"delayUnit,omitempty"` // "MINUTES" | "HOURS" | "DAYS"
 }
 
 // RegisterCampaign is sent once per LH campaign the agent has just
@@ -98,8 +100,11 @@ type RegisterCampaign struct {
 	// (Invite for connection campaigns) or daily_limits.max_limit (global)
 	// based on the first messaging action. Nil when LH had no usable cap;
 	// the platform skips the end-date forecast in that case.
-	MessagesPerDay *int             `json:"messagesPerDay,omitempty"`
-	Actions        []CampaignAction `json:"actions"`
+	MessagesPerDay *int `json:"messagesPerDay,omitempty"`
+	// Campaign kind derived from the workflow: "inmail" or "regular". Scraper
+	// campaigns (no messaging step) are never sent, so this is one of those two.
+	LinkedinKind string           `json:"linkedinKind"`
+	Actions      []CampaignAction `json:"actions"`
 }
 
 // CampaignFunnel carries the volatile counters that always overwrite the
@@ -114,6 +119,9 @@ type CampaignFunnel struct {
 	Target     int  `json:"target"`
 	IsPaused   bool `json:"isPaused"`
 	IsArchived bool `json:"isArchived"`
+	// Most recent action-result time in the campaign; the platform stamps it as
+	// the end date for terminal campaigns. Nil when nothing has run.
+	LastActivityAt *string `json:"lastActivityAt,omitempty"`
 }
 
 // AccountReportRequest is the per-account batch sent every cycle. The

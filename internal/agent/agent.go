@@ -203,10 +203,31 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 	// without re-querying the limits tables per campaign.
 	limits, _ := a.reader.ReadDailyLimits(accCtx, acc.DBPath)
 
-	// Preload step definitions only for campaigns whose version differs from
-	// the platform's known version — steady-state cycles do zero extra IO.
+	// Classify every campaign (inmail / regular / scraper) from its action
+	// types — cheap, and needed for ALL campaigns so scrapers are dropped from
+	// both register and funnel. A read failure defaults to regular so we never
+	// silently lose a real outreach campaign.
+	kindByCampaign := make(map[int64]string, len(campaigns))
+	for _, c := range campaigns {
+		types, err := a.reader.ReadCampaignActionTypes(accCtx, acc.DBPath, c.ID)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"accountId":  acc.ID,
+				"campaignId": c.ID,
+			}).Warn("classify campaign failed, treating as regular")
+			kindByCampaign[c.ID] = lh.KindRegular
+			continue
+		}
+		kindByCampaign[c.ID] = lh.ClassifyLinkedinKind(types)
+	}
+
+	// Preload step definitions only for non-scraper campaigns the platform
+	// needs (re)registered — steady-state cycles do zero extra IO.
 	actionsByCampaign := make(map[int64][]lh.CampaignActionRow)
 	for _, c := range campaigns {
+		if kindByCampaign[c.ID] == lh.KindScraper {
+			continue
+		}
 		if !a.known.needsRegister(acc.ID, int(c.ID), c.Version) {
 			continue
 		}
@@ -221,7 +242,7 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 		actionsByCampaign[c.ID] = rows
 	}
 
-	req := a.buildReport(acc.ID, campaigns, funnels, owner, actionsByCampaign, limits)
+	req := a.buildReport(acc.ID, campaigns, funnels, owner, actionsByCampaign, kindByCampaign, limits)
 	if req == nil {
 		// Partition is empty and not yet known to the platform — nothing to
 		// send. The next cycle will check again.
@@ -262,6 +283,7 @@ func (a *Agent) buildReport(
 	funnels map[int64]lh.Funnel,
 	owner *lh.AccountOwner,
 	actionsByCampaign map[int64][]lh.CampaignActionRow,
+	kindByCampaign map[int64]string,
 	limits lh.DailyLimits,
 ) *client.AccountReportRequest {
 	req := &client.AccountReportRequest{
@@ -299,6 +321,13 @@ func (a *Agent) buildReport(
 	for _, c := range campaigns {
 		cid := int(c.ID)
 
+		// Scraper campaigns (no messaging step — only extract/visit/webhook
+		// actions) carry no outreach the platform tracks, so we drop them
+		// entirely: neither registered nor funneled.
+		if kindByCampaign[c.ID] == lh.KindScraper {
+			continue
+		}
+
 		// Decide whether to (re)send the full campaign metadata this cycle:
 		//   - unknown or version bump (rename / pause toggle / step edit) →
 		//     always re-register;
@@ -322,18 +351,20 @@ func (a *Agent) buildReport(
 				CreatedAt:      c.CreatedAt,
 				Version:        c.Version,
 				MessagesPerDay: limits.MessagesPerDayFor(actions),
+				LinkedinKind:   kindByCampaign[c.ID],
 				Actions:        buildActions(actions),
 			})
 		}
 
 		f := funnels[c.ID]
 		req.Funnels = append(req.Funnels, client.CampaignFunnel{
-			CampaignID: cid,
-			Messaged:   f.Messaged,
-			Replied:    f.Replied,
-			Target:     f.Target,
-			IsPaused:   c.IsPaused,
-			IsArchived: c.IsArchived,
+			CampaignID:     cid,
+			Messaged:       f.Messaged,
+			Replied:        f.Replied,
+			Target:         f.Target,
+			IsPaused:       c.IsPaused,
+			IsArchived:     c.IsArchived,
+			LastActivityAt: f.LastActivityAt,
 		})
 	}
 
@@ -366,6 +397,7 @@ func (a *Agent) setReportInterval(d time.Duration) {
 var messageActionTypes = map[string]struct{}{
 	"MessageToPerson": {},
 	"InvitePerson":    {},
+	"InMail":          {},
 }
 
 // hasMessageActions reports whether any step would become a CampaignMessage on
@@ -393,9 +425,11 @@ func buildActions(rows []lh.CampaignActionRow) []client.CampaignAction {
 	var pendingWaitMs int64
 	for _, r := range rows {
 		a := client.CampaignAction{
-			Type:    r.Type,
-			Body:    r.Body,
-			Example: r.Example,
+			Type:           r.Type,
+			Body:           r.Body,
+			Example:        r.Example,
+			Subject:        r.Subject,
+			ExampleSubject: r.ExampleSubject,
 		}
 		if _, isMessage := messageActionTypes[r.Type]; isMessage {
 			if pendingWaitMs > 0 {

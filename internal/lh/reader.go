@@ -168,6 +168,11 @@ type CampaignActionRow struct {
 	Type    string
 	Body    *string
 	Example *string
+	// Subject/ExampleSubject hold an InMail step's subject line (LH stores it as
+	// actionSettings.subjectTemplate). Regular LinkedIn messages have no subject,
+	// so these stay nil for everything except InMail.
+	Subject        *string
+	ExampleSubject *string
 	// WaitMs is how long LH holds a person at this step before advancing them
 	// to the next workflow action. For CheckForReplies steps it's
 	// actionSettings.moveToSuccessfulAfterMs (e.g. "wait 4 days for a reply
@@ -241,11 +246,79 @@ func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaig
 				row.Body = &tpl
 				row.Example = &ex
 			}
+			if tpl, ex, ok := RenderSubject(settings.String); ok {
+				row.Subject = &tpl
+				row.ExampleSubject = &ex
+			}
 			if ms, ok := parseWaitMs(settings.String); ok {
 				row.WaitMs = &ms
 			}
 		}
 		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// LinkedinKind values mirror the platform's ELinkedinCampaignKind. Scraper
+// campaigns are classified so the agent can drop them before sending.
+const (
+	KindInMail  = "inmail"
+	KindRegular = "regular"
+	KindScraper = "scraper"
+)
+
+// ClassifyLinkedinKind derives a campaign's kind from its action types:
+// an InMail step makes it inmail; an Invite/Message step makes it regular;
+// anything else (only extract/visit/scrape/webhook steps) is a scraper.
+func ClassifyLinkedinKind(actionTypes []string) string {
+	hasInMail, hasMessaging := false, false
+	for _, t := range actionTypes {
+		switch t {
+		case "InMail":
+			hasInMail = true
+		case "InvitePerson", "MessageToPerson":
+			hasMessaging = true
+		}
+	}
+	if hasInMail {
+		return KindInMail
+	}
+	if hasMessaging {
+		return KindRegular
+	}
+	return KindScraper
+}
+
+// ReadCampaignActionTypes returns the distinct action types in a campaign's
+// current version — enough to classify the campaign (inmail / regular /
+// scraper) without rendering every template. Cheaper than ReadCampaignActions,
+// so the agent can classify all campaigns each cycle to decide which to skip.
+func (r *Reader) ReadCampaignActionTypes(ctx context.Context, dbPath string, campaignID int64) ([]string, error) {
+	db, err := r.open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT ac."actionType"
+		FROM campaign_last_versions clv
+		JOIN campaign_version_actions cva ON cva.version_id = clv.version_id
+		JOIN action_versions av ON av.action_id = cva.action_id
+		JOIN action_configs ac ON ac.id = av.config_id
+		WHERE clv.campaign_id = ?
+	`, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("select campaign action types: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, fmt.Errorf("scan action type: %w", err)
+		}
+		out = append(out, t)
 	}
 	return out, rows.Err()
 }
