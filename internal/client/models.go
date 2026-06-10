@@ -48,20 +48,24 @@ type KnownCampaign struct {
 	HasMessages bool `json:"hasMessages"`
 }
 
-// RegisterAccount is sent only the first time an LH accountId is reported.
-// The platform creates a Client + platform-link (PENDING) from this; later
-// cycles omit the block entirely.
+// RegisterAccount is the full account snapshot, sent every cycle. On the first
+// cycle for an accountId the platform creates a Client + platform-link
+// (PENDING) from it; on later cycles it refreshes the mutable health fields
+// (LastLoginAt, SSI) on linkedin_accounts.
 //
 // externalId is LinkedIn's internal numeric member id — stable across name
 // changes / vanity-URL rewrites and the strongest matcher we have. Email
 // and fullName are softer matchers used as fallbacks when the platform
-// doesn't yet know the LinkedIn id of a Client. Shape is flat to match the
-// platform DTO (LhAgentRegisterAccountDto).
+// doesn't yet know the LinkedIn id of a Client. LastLoginAt (ISO) and SSI feed
+// the LH account health calculator. Shape is flat to match the platform DTO
+// (LhAgentRegisterAccountDto).
 type RegisterAccount struct {
-	ExternalID *string `json:"externalId,omitempty"`
-	Email      *string `json:"email,omitempty"`
-	FullName   *string `json:"fullName,omitempty"`
-	Avatar     *string `json:"avatar,omitempty"`
+	ExternalID  *string `json:"externalId,omitempty"`
+	Email       *string `json:"email,omitempty"`
+	FullName    *string `json:"fullName,omitempty"`
+	Avatar      *string `json:"avatar,omitempty"`
+	LastLoginAt *string `json:"lastLoginAt,omitempty"`
+	SSI         *int    `json:"ssi,omitempty"`
 }
 
 // CampaignAction is one workflow step from lh.db. For messaging actions

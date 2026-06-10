@@ -300,18 +300,23 @@ func (a *Agent) buildReport(
 		Funnels:           make([]client.CampaignFunnel, 0, len(campaigns)),
 	}
 
-	// registerAccount goes only when (a) the platform doesn't know this LH
-	// accountId yet AND (b) the partition has actually been used — either
-	// the LH user signed in (owner info populated) or at least one campaign
-	// exists. Empty partitions on disk are common (a freshly added LH login
-	// the user hasn't opened yet) and should not spam Clients with
-	// placeholder rows.
-	if !a.known.hasAccount(accountID) && (owner != nil || len(campaigns) > 0) {
+	// The account block is the full snapshot, sent every cycle so the platform
+	// can refresh mutable health (lastLoginAt, ssi) on each pass; on the first
+	// cycle for an unknown account it also seeds the Client. It goes out when
+	// either (a) we have an owner signal worth shipping, or (b) the account is
+	// new and at least has campaigns — so a brand-new account with campaigns but
+	// no resolved owner still registers. Empty partitions on disk are common (a
+	// freshly added LH login the user hasn't opened yet) and stay silent so we
+	// don't spam Clients with placeholder rows.
+	hasOwner := owner != nil && hasOwnerSignal(owner)
+	if hasOwner || (!a.known.hasAccount(accountID) && len(campaigns) > 0) {
 		req.RegisterAccount = &client.RegisterAccount{}
-		if owner != nil && hasOwnerSignal(owner) {
+		if hasOwner {
 			req.RegisterAccount.Email = owner.Email
 			req.RegisterAccount.FullName = owner.FullName
 			req.RegisterAccount.Avatar = owner.Avatar
+			req.RegisterAccount.LastLoginAt = owner.LastLoginAt
+			req.RegisterAccount.SSI = owner.SSI
 			if owner.ExternalID != nil {
 				s := strconv.FormatInt(*owner.ExternalID, 10)
 				req.RegisterAccount.ExternalID = &s

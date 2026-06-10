@@ -3,6 +3,7 @@ package lh
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sync"
@@ -38,10 +39,12 @@ type Campaign struct {
 // are softer matchers used as fallbacks when the platform doesn't yet have
 // the LinkedIn id of a known client.
 type AccountOwner struct {
-	ExternalID *int64
-	Email      *string
-	FullName   *string
-	Avatar     *string
+	ExternalID  *int64
+	Email       *string
+	FullName    *string
+	Avatar      *string
+	LastLoginAt *string
+	SSI         *int
 }
 
 // Reader owns one open SQLite connection pool per LH account database. Pools
@@ -443,18 +446,19 @@ func (r *Reader) ReadAccountOwner(ctx context.Context, dbPath string) (*AccountO
 	}
 
 	row := db.QueryRowContext(ctx, `
-		SELECT external_id, full_name, email, avatar
+		SELECT external_id, full_name, email, avatar, last_login_at
 		FROM li_accounts
 		WHERE id = 1
 	`)
 
 	var (
-		externalID sql.NullInt64
-		fullName   sql.NullString
-		email      sql.NullString
-		avatar     sql.NullString
+		externalID  sql.NullInt64
+		fullName    sql.NullString
+		email       sql.NullString
+		avatar      sql.NullString
+		lastLoginAt sql.NullString
 	)
-	if err := row.Scan(&externalID, &fullName, &email, &avatar); err != nil {
+	if err := row.Scan(&externalID, &fullName, &email, &avatar, &lastLoginAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -478,5 +482,42 @@ func (r *Reader) ReadAccountOwner(ctx context.Context, dbPath string) (*AccountO
 		s := avatar.String
 		owner.Avatar = &s
 	}
+	if lastLoginAt.Valid && lastLoginAt.String != "" {
+		s := lastLoginAt.String
+		owner.LastLoginAt = &s
+	}
+	owner.SSI = r.readAccountSSI(ctx, db)
 	return owner, nil
+}
+
+// readAccountSSI returns the latest Social Selling Index total for the account,
+// or nil when no snapshot exists. Best-effort: any error (missing table on
+// older LH builds, malformed JSON) yields nil rather than failing the owner read.
+func (r *Reader) readAccountSSI(ctx context.Context, db *sql.DB) *int {
+	row := db.QueryRowContext(ctx, `
+		SELECT snapshot_data
+		FROM li_account_ssi_snapshot_store
+		WHERE aggregate_id = 1
+		ORDER BY version DESC
+		LIMIT 1
+	`)
+
+	var snapshot sql.NullString
+	if err := row.Scan(&snapshot); err != nil || !snapshot.Valid {
+		return nil
+	}
+
+	var parsed struct {
+		LastScore struct {
+			Total *float64 `json:"total"`
+		} `json:"lastScore"`
+	}
+	if err := json.Unmarshal([]byte(snapshot.String), &parsed); err != nil {
+		return nil
+	}
+	if parsed.LastScore.Total == nil {
+		return nil
+	}
+	total := int(*parsed.LastScore.Total)
+	return &total
 }
