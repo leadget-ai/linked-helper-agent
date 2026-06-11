@@ -9,13 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	_ "modernc.org/sqlite" // pure-Go driver, no CGO required
 )
 
-// Campaign is a single row from the LH `campaigns` table, with the integer
-// fields normalised to Go types. Boolean columns are stored as INTEGER in
-// SQLite — we widen them once here so the rest of the codebase doesn't have
-// to remember the convention.
+// Campaign is one row from the LH `campaigns` table with SQLite's
+// INTEGER-as-boolean columns widened to Go types.
 type Campaign struct {
 	ID          int64
 	Name        string
@@ -25,39 +24,67 @@ type Campaign struct {
 	IsArchived  bool
 	IsValid     *bool
 	CreatedAt   string // raw ISO string as LH stores it
-	// Latest version_id from campaign_last_versions (LH bumps this on any
-	// edit — rename, pause, step changes). 0 if the campaign has no
-	// versions yet, which shouldn't happen for a live campaign.
+	// campaign_last_versions.version_id — LH bumps it on any edit (rename,
+	// pause, step changes). 0 = no versions yet.
 	Version int
 }
 
-// AccountOwner is the LinkedIn identity behind one LH login, used so the
-// platform can later automatch the LH account to an existing Client.
-//
-// ExternalID is LinkedIn's internal numeric member ID — stable across name
-// changes / URL rewrites and our best key for matching. Email and FullName
-// are softer matchers used as fallbacks when the platform doesn't yet have
-// the LinkedIn id of a known client.
+// AccountOwner is the LH login's LinkedIn identity, assembled by the
+// ownerSources chain. ExternalID is the REAL LinkedIn member id (from
+// person_external_ids type_group='member'), not Linked Helper's internal
+// account id. ProfileURL is built from the public vanity slug when the owner
+// has one, falling back to the ACoAA… hash form.
 type AccountOwner struct {
 	ExternalID  *int64
 	Email       *string
 	FullName    *string
 	Avatar      *string
+	ProfileURL  *string
+	PublicSlug  *string
 	LastLoginAt *string
 	SSI         *int
 }
 
-// Reader owns one open SQLite connection pool per LH account database. Pools
-// are created lazily and kept open across cycles — opening a fresh handle
-// every minute would defeat WAL caching and is the kind of thing that leaks
-// file descriptors on long-running agents.
+func (o *AccountOwner) isEmpty() bool {
+	return o.ExternalID == nil && o.Email == nil && o.FullName == nil &&
+		o.Avatar == nil && o.ProfileURL == nil && o.PublicSlug == nil &&
+		o.LastLoginAt == nil && o.SSI == nil
+}
+
+// Reader owns one lazily-opened SQLite handle (and capability profile) per LH
+// partition, kept across cycles — reopening every cycle would defeat WAL
+// caching and leak file descriptors on long-running agents.
 type Reader struct {
-	mu      sync.Mutex
-	handles map[string]*sql.DB
+	mu       sync.Mutex
+	handles  map[string]*sql.DB
+	profiles map[string]*DBProfile
 }
 
 func NewReader() *Reader {
-	return &Reader{handles: make(map[string]*sql.DB)}
+	return &Reader{
+		handles:  make(map[string]*sql.DB),
+		profiles: make(map[string]*DBProfile),
+	}
+}
+
+// profileFor builds the capability profile on first access. The schema of an
+// open lh.db only changes across LH upgrades, which restart the desktop app
+// (and this agent's handle with it), so caching for the Reader's lifetime is
+// safe.
+func (r *Reader) profileFor(ctx context.Context, dbPath string, db *sql.DB) *DBProfile {
+	r.mu.Lock()
+	if profile, ok := r.profiles[dbPath]; ok {
+		r.mu.Unlock()
+		return profile
+	}
+	r.mu.Unlock()
+
+	profile := BuildDBProfile(ctx, db)
+
+	r.mu.Lock()
+	r.profiles[dbPath] = profile
+	r.mu.Unlock()
+	return profile
 }
 
 // Close releases every cached connection. Call from agent shutdown.
@@ -74,8 +101,11 @@ func (r *Reader) Close() error {
 	return firstErr
 }
 
-// open returns a *sql.DB for `dbPath`, creating it on first access. Read-only
-// + WAL means we never block the LH desktop process that holds the file.
+// open returns the cached *sql.DB for `dbPath`, creating it on first access.
+// Strictly read-only so we never block the LH desktop process holding the
+// file. busy_timeout is the only pragma that is safe here: journal_mode and
+// (on modernc's driver) foreign_keys go through the write path and fail on a
+// mode=ro handle — WAL is inherited from LH's own connection anyway.
 func (r *Reader) open(dbPath string) (*sql.DB, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -83,15 +113,6 @@ func (r *Reader) open(dbPath string) (*sql.DB, error) {
 		return db, nil
 	}
 
-	// modernc.org/sqlite uses the URI form for pragmas. Stay strictly
-	// read-only and avoid every PRAGMA that mutates the database file:
-	//   - `journal_mode` rewrites the header, so setting WAL here fails
-	//     with "attempt to write a readonly database" on any file not
-	//     already in WAL. LH itself opens lh.db in WAL when it runs;
-	//     our handle inherits that, so we don't need to set it.
-	//   - `foreign_keys` is per-connection but, on modernc's driver, is
-	//     still routed through the write path on open.
-	//   `busy_timeout` is connection-local and safe.
 	dsn := fmt.Sprintf(
 		"file:%s?mode=ro&_pragma=busy_timeout(5000)",
 		url.PathEscape(dbPath),
@@ -101,8 +122,7 @@ func (r *Reader) open(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	// One connection per LH account is plenty — we run queries serially per
-	// account and any concurrency lives at the account level.
+	// Queries run serially per account; concurrency lives at the account level.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxIdleTime(30 * time.Minute)
@@ -116,9 +136,9 @@ func (r *Reader) open(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-// ReadCampaigns returns campaigns created after `since` (use the empty string
-// on the first sync to fetch everything). `since` is compared as raw text —
-// LH stores ISO-8601 timestamps which collate correctly that way.
+// ReadCampaigns returns campaigns created after `since` (empty string =
+// everything). Compared as raw text — LH's ISO-8601 timestamps collate
+// correctly that way.
 func (r *Reader) ReadCampaigns(ctx context.Context, dbPath, since string) ([]Campaign, error) {
 	db, err := r.open(dbPath)
 	if err != nil {
@@ -163,51 +183,36 @@ func (r *Reader) ReadCampaigns(ctx context.Context, dbPath, since string) ([]Cam
 	return out, rows.Err()
 }
 
-// CampaignActionRow is one workflow step joined out of the LH schema. The
-// step "type" lives on action_configs.actionType and the template/wait live
-// on action_configs.actionSettings. Body/Example are populated only for
-// messaging actions where the template renderer found content.
+// CampaignActionRow is one workflow step. Body/Example are populated only
+// for messaging actions where the template renderer found content;
+// Subject/ExampleSubject only for InMail steps.
 type CampaignActionRow struct {
-	Type    string
-	Body    *string
-	Example *string
-	// Subject/ExampleSubject hold an InMail step's subject line (LH stores it as
-	// actionSettings.subjectTemplate). Regular LinkedIn messages have no subject,
-	// so these stay nil for everything except InMail.
+	Type           string
+	Body           *string
+	Example        *string
 	Subject        *string
 	ExampleSubject *string
-	// WaitMs is how long LH holds a person at this step before advancing them
-	// to the next workflow action. For CheckForReplies steps it's
-	// actionSettings.moveToSuccessfulAfterMs (e.g. "wait 4 days for a reply
-	// before sending the next message"). This — NOT action_configs.coolDown,
-	// which is a fixed per-dispatch throttle — is the real inter-message
-	// interval. The caller folds it onto the delay of the *next* messaging
-	// action, since LH encodes inter-message waits as their own steps. Nil
-	// when the step imposes no wait.
+	// WaitMs is actionSettings.moveToSuccessfulAfterMs — how long LH holds a
+	// person at this step (e.g. a CheckForReplies' "wait 4 days for a reply").
+	// This, NOT action_configs.coolDown (a fixed per-dispatch throttle), is
+	// the real inter-message interval; the caller folds it onto the delay of
+	// the next messaging action.
 	WaitMs *int64
 }
 
-// ReadCampaignActions walks campaign → last_version → version_actions →
-// actions → action_versions → action_configs and returns every step in
-// workflow order. Non-messaging actions come back with Body=Example=nil so
-// the caller can keep their position when assigning seq numbers but skip
-// them when writing CampaignMessage rows.
+// ReadCampaignActions returns the current version's steps in workflow order.
+// Non-messaging actions come back with Body=Example=nil so the caller keeps
+// their position when assigning seq numbers.
+//
+// Ordered by campaign_version_actions.id, NOT actions.startAt: startAt is a
+// mutable runtime timestamp that drifts as the campaign executes, while cva
+// rows are inserted in design order when the version is built.
 func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaignID int64) ([]CampaignActionRow, error) {
 	db, err := r.open(dbPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// We join through action_versions to find the latest config per action.
-	// One action may have multiple versions; the highest id wins, mirroring
-	// how LH itself resolves "current settings".
-	//
-	// Order by campaign_version_actions.id, NOT actions.startAt: startAt is a
-	// mutable runtime timestamp (the step's last scheduled execution, which
-	// drifts as the campaign runs and postpones), so ordering by it scrambles
-	// the workflow into execution order. cva rows are inserted in design order
-	// when the current version is built, so cva.id ascending is the true step
-	// sequence.
 	rows, err := db.QueryContext(ctx, `
 		WITH latest_av AS (
 			SELECT av.action_id, MAX(av.id) AS max_id
@@ -262,22 +267,19 @@ func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaig
 	return out, rows.Err()
 }
 
-// StepStat is one workflow step's engagement, in workflow (cva.id) order.
-// Sent counts people the step actually processed; Replied counts people who
-// replied. LH records a reply on the CheckForReplies step that FOLLOWS a
-// message, not on the message itself — the caller folds each CheckForReplies'
-// Replied back onto the preceding messaging step (mirror of how WaitMs folds
-// forward).
+// StepStat is one workflow step's engagement, in workflow order. LH records
+// a reply on the CheckForReplies step that FOLLOWS a message, not on the
+// message itself — the caller folds it back onto the preceding messaging
+// step.
 type StepStat struct {
 	Type    string
 	Sent    int
 	Replied int
 }
 
-// ReadCampaignStepStats returns per-action sent/replied counts for a campaign
-// in workflow order. One GROUP BY over person_in_campaigns_history joined to
-// the campaign's current-version actions — used both to classify the campaign
-// and to build the per-step funnel every cycle.
+// ReadCampaignStepStats returns per-action sent/replied counts in workflow
+// order — used both to classify the campaign and to build the per-step
+// funnel.
 func (r *Reader) ReadCampaignStepStats(ctx context.Context, dbPath string, campaignID int64) ([]StepStat, error) {
 	db, err := r.open(dbPath)
 	if err != nil {
@@ -321,17 +323,16 @@ func (r *Reader) ReadCampaignStepStats(ctx context.Context, dbPath string, campa
 	return out, rows.Err()
 }
 
-// LinkedinKind values mirror the platform's ELinkedinCampaignKind. Scraper
-// campaigns are classified so the agent can drop them before sending.
+// LinkedinKind values mirror the platform's ELinkedinCampaignKind.
 const (
 	KindInMail  = "inmail"
 	KindRegular = "regular"
 	KindScraper = "scraper"
 )
 
-// ClassifyLinkedinKind derives a campaign's kind from its action types:
-// an InMail step makes it inmail; an Invite/Message step makes it regular;
-// anything else (only extract/visit/scrape/webhook steps) is a scraper.
+// ClassifyLinkedinKind derives a campaign's kind from its action types: an
+// InMail step makes it inmail, an Invite/Message step regular, anything else
+// (only extract/visit/webhook steps) a scraper the agent drops.
 func ClassifyLinkedinKind(actionTypes []string) string {
 	hasInMail, hasMessaging := false, false
 	for _, t := range actionTypes {
@@ -351,20 +352,15 @@ func ClassifyLinkedinKind(actionTypes []string) string {
 	return KindScraper
 }
 
-// DailyLimits holds the per-day send caps the LH account is configured with.
-// General is daily_limits.max_limit (the global per-day ceiling). Invite is
-// the Invite limit_type cap; Message is the general cap (LH has no plain
-// MessageToPerson per-action cap row in normal installs, so message-only
-// campaigns are bound by General). Zero means "no cap configured / unknown".
+// DailyLimits holds the per-day send caps: General is daily_limits.max_limit
+// (the global ceiling), Invite the Invite limit_type cap. LH has no plain
+// MessageToPerson per-action cap, so message campaigns are bound by General.
+// Zero means no cap configured / unknown.
 type DailyLimits struct {
 	General int
 	Invite  int
 }
 
-// ReadDailyLimits pulls the per-day caps for this LH login. We hit two
-// tables: daily_limits.max_limit (global) and limit_type_period_max_credits
-// joined to limit_types.type='Invite' (per-action). Both queries are tiny
-// and run once per cycle per account, so the cost is negligible.
 func (r *Reader) ReadDailyLimits(ctx context.Context, dbPath string) (DailyLimits, error) {
 	db, err := r.open(dbPath)
 	if err != nil {
@@ -398,11 +394,9 @@ func (r *Reader) ReadDailyLimits(ctx context.Context, dbPath string) (DailyLimit
 	return out, nil
 }
 
-// MessagesPerDayFor picks the right per-day cap for a campaign based on its
-// first messaging action. Connection campaigns (InvitePerson) are throttled
-// by the Invite limit; everything else is throttled by the global daily cap.
-// Returns nil when we can't pick a meaningful number — caller serialises that
-// as a null on the wire so the platform won't render a bogus forecast.
+// MessagesPerDayFor picks the cap that throttles this campaign, based on its
+// first messaging action. Nil when no meaningful cap exists — the platform
+// then skips its end-date forecast.
 func (d DailyLimits) MessagesPerDayFor(actions []CampaignActionRow) *int {
 	for _, a := range actions {
 		switch a.Type {
@@ -425,68 +419,53 @@ func (d DailyLimits) MessagesPerDayFor(actions []CampaignActionRow) *int {
 	return nil
 }
 
-// ReadAccountOwner pulls the LH login's LinkedIn identity from `li_accounts`,
-// best-effort. `li_accounts` is keyed by `id`; the user-facing login is row 1
-// in every LH partition we've seen.
+// InspectProfile exposes the partition's capability profile for diagnostics
+// (cmd/inspectdb). Production reads go through ReadAccountOwner, which uses
+// the same cached profile internally.
+func (r *Reader) InspectProfile(ctx context.Context, dbPath string) (*DBProfile, error) {
+	db, err := r.open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	return r.profileFor(ctx, dbPath, db), nil
+}
+
+// ReadAccountOwner assembles the LH login's LinkedIn identity by running the
+// ownerSources chain against the partition (see owner_sources.go). Each source
+// only fills fields the previous ones left empty, and each gates itself on the
+// partition's capability profile, so one code path serves every lh.db schema
+// generation we know (v195 person-tables-only through v210).
 //
-// Schema observed in LH 2 (May 2026): id, external_id, full_name, avatar,
-// email, last_login_at, created_at, updated_at. Older LH builds carried
-// `name` / `public_identifier` / `profile_url` instead — we don't read those
-// any more because the new schema doesn't have them and even the legacy
-// fallback never gave us a numeric LinkedIn member id, which is the most
-// useful matcher.
-//
-// Returns (nil, nil) when the row is missing or the query fails — the agent
-// treats it as "owner unknown" and ships the account anyway. We never fail
-// the whole sync over the owner field.
+// Returns (nil, nil) when nothing could be resolved at all — the agent treats
+// it as "owner unknown" and ships the account anyway. We never fail the whole
+// sync over the owner field.
 func (r *Reader) ReadAccountOwner(ctx context.Context, dbPath string) (*AccountOwner, error) {
 	db, err := r.open(dbPath)
 	if err != nil {
 		return nil, err
 	}
 
-	row := db.QueryRowContext(ctx, `
-		SELECT external_id, full_name, email, avatar, last_login_at
-		FROM li_accounts
-		WHERE id = 1
-	`)
-
-	var (
-		externalID  sql.NullInt64
-		fullName    sql.NullString
-		email       sql.NullString
-		avatar      sql.NullString
-		lastLoginAt sql.NullString
-	)
-	if err := row.Scan(&externalID, &fullName, &email, &avatar, &lastLoginAt); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, nil //nolint:nilerr
-	}
-
+	profile := r.profileFor(ctx, dbPath, db)
 	owner := &AccountOwner{}
-	if externalID.Valid {
-		v := externalID.Int64
-		owner.ExternalID = &v
+	for _, source := range ownerSources {
+		if !source.Supports(profile) {
+			continue
+		}
+		if err := source.Fill(ctx, db, profile, owner); err != nil {
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"source":        source.Name(),
+				"schemaVersion": profile.SchemaVersion,
+			}).Warn("owner source failed; continuing with partial owner")
+		}
 	}
-	if fullName.Valid && fullName.String != "" {
-		s := fullName.String
-		owner.FullName = &s
+
+	if profile.HasTable("li_account_ssi_snapshot_store") {
+		owner.SSI = r.readAccountSSI(ctx, db)
 	}
-	if email.Valid && email.String != "" {
-		s := email.String
-		owner.Email = &s
+
+	if owner.isEmpty() {
+		return nil, nil
 	}
-	if avatar.Valid && avatar.String != "" {
-		s := avatar.String
-		owner.Avatar = &s
-	}
-	if lastLoginAt.Valid && lastLoginAt.String != "" {
-		s := lastLoginAt.String
-		owner.LastLoginAt = &s
-	}
-	owner.SSI = r.readAccountSSI(ctx, db)
 	return owner, nil
 }
 

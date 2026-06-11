@@ -1,16 +1,12 @@
 // Package client is the wire contract between the LH agent and the platform.
-// The structs here mirror the DTOs in @leadget-ai/models — keep them in sync.
+// The structs mirror the DTOs in @leadget-ai/models — keep them in sync.
 package client
 
-// BootstrapRequest identifies the agent install to the server. Sent once at
-// startup; the response carries the cadence the agent should run at AND the
-// seed known-state snapshot the agent diffs against on the first cycle.
+// BootstrapRequest identifies the agent install to the server, sent once at
+// startup. AgentID is a persistent UUID stored outside the install dir (see
+// agent.LoadOrCreateAgentID) so the platform can dedupe agents even when
+// hostname or IP change.
 type BootstrapRequest struct {
-	// Persistent UUID generated on first run and stored in the agent's data
-	// dir (ProgramData on Windows, ~/Library/Application Support on macOS,
-	// ~/.config on Linux). Survives sc.exe delete + reinstall, so the
-	// platform can dedupe agents[] entries reliably even when hostname or
-	// IP change.
 	AgentID         string `json:"agentId,omitempty"`
 	AgentVersion    string `json:"agentVersion"`
 	Hostname        string `json:"hostname"`
@@ -25,9 +21,9 @@ type BootstrapResponse struct {
 	KnownState     KnownState `json:"knownState"`
 }
 
-// KnownState mirrors ILhAgentKnownState — the (account, campaign) tuples
-// the platform already has registered for this integration. Returned by
-// bootstrap and refreshed by every report.
+// KnownState is the platform's view of what it already has for this
+// integration. Returned by bootstrap and refreshed by every report; the agent
+// diffs against it to decide what to (re)send.
 type KnownState struct {
 	Accounts  []int           `json:"accounts"`
 	Campaigns []KnownCampaign `json:"campaigns"`
@@ -36,46 +32,39 @@ type KnownState struct {
 type KnownCampaign struct {
 	AccountID  int `json:"accountId"`
 	CampaignID int `json:"campaignId"`
-	// Version the platform last accepted. The agent skips re-register only
-	// when its current LH version_id matches; any bump means re-send so
-	// renames / pause toggles / step edits propagate. 0 = pre-versioning row
-	// → unconditional re-register on the next cycle.
+	// LH version_id the platform last accepted; 0 = pre-versioning row that
+	// must be re-registered.
 	Version int `json:"version"`
-	// HasMessages is whether the platform already stored CampaignMessage rows
-	// for this campaign. False forces a re-register even at a matching version
-	// so messages missing on the platform (campaign first synced before message
-	// mirroring, or a one-off action read failure) get backfilled.
+	// Whether the platform stored CampaignMessage rows; false triggers a
+	// message backfill even at a matching version.
 	HasMessages bool `json:"hasMessages"`
 }
 
-// RegisterAccount is the full account snapshot, sent every cycle. On the first
-// cycle for an accountId the platform creates a Client + platform-link
-// (PENDING) from it; on later cycles it refreshes the mutable health fields
-// (LastLoginAt, SSI) on linkedin_accounts.
-//
-// externalId is LinkedIn's internal numeric member id — stable across name
-// changes / vanity-URL rewrites and the strongest matcher we have. Email
-// and fullName are softer matchers used as fallbacks when the platform
-// doesn't yet know the LinkedIn id of a Client. LastLoginAt (ISO) and SSI feed
-// the LH account health calculator. Shape is flat to match the platform DTO
-// (LhAgentRegisterAccountDto).
+// RegisterAccount is the full account snapshot, sent every cycle: identity
+// fields seed/refresh the Client and linkedin_accounts row, LastLoginAt and
+// SSI feed the LH account health calculator. ExternalID is the real LinkedIn
+// member id (stable across renames), not Linked Helper's internal account id.
 type RegisterAccount struct {
-	ExternalID  *string `json:"externalId,omitempty"`
-	Email       *string `json:"email,omitempty"`
-	FullName    *string `json:"fullName,omitempty"`
-	Avatar      *string `json:"avatar,omitempty"`
-	LastLoginAt *string `json:"lastLoginAt,omitempty"`
-	SSI         *int    `json:"ssi,omitempty"`
+	ExternalID  *string          `json:"externalId,omitempty"`
+	Email       *string          `json:"email,omitempty"`
+	FullName    *string          `json:"fullName,omitempty"`
+	Avatar      *string          `json:"avatar,omitempty"`
+	Owner       *AccountOwnerRef `json:"owner,omitempty"`
+	LastLoginAt *string          `json:"lastLoginAt,omitempty"`
+	SSI         *int             `json:"ssi,omitempty"`
 }
 
-// CampaignAction is one workflow step from lh.db. For messaging actions
-// (MessageToPerson / InvitePerson) Body holds the message template with
-// {var} placeholders intact and Example holds the same template with
-// sample values substituted. Delay is the wait BEFORE this action, folded in
-// from the CheckForReplies step(s) that precede it in the sequence (LH stores
-// the inter-message wait as that step's moveToSuccessfulAfterMs). Non-messaging
-// actions ship with Body=Example=nil and tell the platform the step exists
-// without trying to mirror its content.
+// AccountOwnerRef is the owner's public LinkedIn identity: the canonical
+// linkedin.com/in/… URL and the bare vanity slug it was built from.
+type AccountOwnerRef struct {
+	ProfileURL *string `json:"profileUrl,omitempty"`
+	PublicID   *string `json:"publicId,omitempty"`
+}
+
+// CampaignAction is one workflow step. Body/Example carry the message
+// template with placeholders intact and with sample values substituted;
+// both are nil for non-messaging steps. Delay is the wait BEFORE this action
+// (folded in from the CheckForReplies steps that precede it).
 type CampaignAction struct {
 	Type           string  `json:"type"`
 	Body           *string `json:"body"`
@@ -86,8 +75,9 @@ type CampaignAction struct {
 	DelayUnit      *string `json:"delayUnit,omitempty"` // "MINUTES" | "HOURS" | "DAYS"
 }
 
-// RegisterCampaign is sent once per LH campaign the agent has just
-// discovered. Subsequent cycles only ship its CampaignFunnel.
+// RegisterCampaign carries a campaign's full metadata. Sent when the platform
+// doesn't know the campaign at this version; steady-state cycles ship only
+// the funnel.
 type RegisterCampaign struct {
 	CampaignID  int     `json:"campaignId"`
 	Name        string  `json:"name"`
@@ -96,26 +86,20 @@ type RegisterCampaign struct {
 	IsPaused    bool    `json:"isPaused"`
 	IsArchived  bool    `json:"isArchived"`
 	CreatedAt   string  `json:"createdAt"`
-	// LH campaign_last_versions.version_id at the moment of send. Echoed
-	// back in knownState so future cycles can short-circuit unchanged
-	// campaigns.
+	// LH version_id at the moment of send; echoed back in knownState.
 	Version int `json:"version"`
-	// Per-day send cap for this campaign — picked from LH's limit_types
-	// (Invite for connection campaigns) or daily_limits.max_limit (global)
-	// based on the first messaging action. Nil when LH had no usable cap;
-	// the platform skips the end-date forecast in that case.
+	// Per-day send cap from LH's limit tables; nil disables the platform's
+	// end-date forecast.
 	MessagesPerDay *int `json:"messagesPerDay,omitempty"`
-	// Campaign kind derived from the workflow: "inmail" or "regular". Scraper
-	// campaigns (no messaging step) are never sent, so this is one of those two.
+	// "inmail" or "regular" — scraper campaigns are never sent.
 	LinkedinKind string           `json:"linkedinKind"`
 	Actions      []CampaignAction `json:"actions"`
 }
 
-// CampaignFunnel carries the volatile counters that always overwrite the
-// platform-side values. IsPaused/IsArchived ride along on every cycle so
-// the platform can flip status without re-firing registerCampaign — LH
-// pause/archive don't bump campaign_last_versions.version_id, so the
-// version-gated upsert path would otherwise miss those transitions.
+// CampaignFunnel carries the volatile counters, sent every cycle and always
+// overwriting platform-side values. IsPaused/IsArchived ride along because LH
+// pause/archive don't bump version_id, so the version-gated register path
+// would miss those transitions.
 type CampaignFunnel struct {
 	CampaignID int  `json:"campaignId"`
 	Messaged   int  `json:"messaged"`
@@ -123,20 +107,17 @@ type CampaignFunnel struct {
 	Target     int  `json:"target"`
 	IsPaused   bool `json:"isPaused"`
 	IsArchived bool `json:"isArchived"`
-	// Most recent action-result time in the campaign; the platform stamps it as
-	// the end date for terminal campaigns. Nil when nothing has run.
+	// Most recent action-result time; the platform uses it as the end date
+	// for terminal campaigns.
 	LastActivityAt *string `json:"lastActivityAt,omitempty"`
-	// Campaign kind ("inmail" / "regular"), sent every cycle so the platform can
-	// backfill it onto campaigns registered before the kind field existed.
+	// Sent every cycle so the platform backfills campaigns registered before
+	// the kind field existed.
 	LinkedinKind string `json:"linkedinKind"`
-	// Per-message engagement, one entry per messaging step (seq numbering matches
-	// the platform's CampaignMessage rows). Lets the platform fill per-message
-	// sent/replied, which the campaign-level counters can't.
+	// Per-message engagement; seq numbering matches the platform's
+	// CampaignMessage rows.
 	Steps []FunnelStep `json:"steps"`
 }
 
-// FunnelStep is one messaging step's sent/replied, keyed by the same seq number
-// the platform assigns to its CampaignMessage rows.
 type FunnelStep struct {
 	SeqNumber int `json:"seqNumber"`
 	Sent      int `json:"sent"`
@@ -144,13 +125,9 @@ type FunnelStep struct {
 }
 
 // AccountReportRequest is the per-account batch sent every cycle. The
-// "register" blocks are optional/empty on steady-state cycles; funnels are
-// always present.
+// register blocks are empty on steady-state cycles; funnels are always
+// present.
 type AccountReportRequest struct {
-	// Same persistent UUID as BootstrapRequest.AgentID — included on every
-	// cycle so the platform can refresh agents[].lastSeenAt / lastSeenIp
-	// between bootstraps (bootstrap fires on agent restart, reports every
-	// ~10 minutes).
 	AgentID           string             `json:"agentId,omitempty"`
 	SyncedAt          string             `json:"syncedAt"`
 	RegisterAccount   *RegisterAccount   `json:"registerAccount,omitempty"`

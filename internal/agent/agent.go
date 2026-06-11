@@ -20,8 +20,6 @@ const (
 	minReportInterval     = 30 * time.Second
 	maxReportInterval     = 60 * time.Minute
 
-	// Per-account cycle gets its own short timeout so a misbehaving SQLite
-	// query doesn't pin a goroutine forever.
 	accountCycleTimeout = 2 * time.Minute
 )
 
@@ -32,8 +30,6 @@ type Agent struct {
 	reader  *lh.Reader
 	known   *known
 	version string
-	// Persistent install id (UUID), read once at startup. Empty when the
-	// data dir is unwritable — platform falls back to hostname matching.
 	agentID string
 
 	mu             sync.RWMutex
@@ -56,7 +52,7 @@ func New(cfg *Config, version string) *Agent {
 	}
 }
 
-// Run blocks until ctx is cancelled. Returns when the loop exits cleanly.
+// Run blocks until ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) {
 	log.WithFields(log.Fields{
 		"endpoint":      a.cfg.APIEndpoint,
@@ -70,9 +66,6 @@ func (a *Agent) Run(ctx context.Context) {
 	}()
 
 	a.bootstrap(ctx)
-
-	// First cycle right away so the user sees data on the dashboard without
-	// waiting for the first tick.
 	a.cycle(ctx)
 
 	ticker := time.NewTicker(a.getReportInterval())
@@ -95,9 +88,8 @@ func (a *Agent) Run(ctx context.Context) {
 	}
 }
 
-// bootstrap sends the one-shot identify call and seeds the known-state cache.
-// Failure is non-fatal: the cache stays empty (treats everything as new) and
-// the next cycle's report response will refresh it.
+// bootstrap seeds the known-state cache. Failure is non-fatal: an empty cache
+// treats everything as new and the first report response refreshes it.
 func (a *Agent) bootstrap(ctx context.Context) {
 	hostname, _ := os.Hostname()
 	accounts, err := lh.Scan(a.cfg.PartitionsDir)
@@ -130,7 +122,8 @@ func (a *Agent) bootstrap(ctx context.Context) {
 	}).Info("bootstrap ok")
 }
 
-// cycle scans partitions and syncs each account in parallel (bounded).
+// cycle scans partitions and syncs each account in parallel, bounded by
+// NumCPU (SQLite reads are the CPU-bound part).
 func (a *Agent) cycle(ctx context.Context) {
 	accounts, err := lh.Scan(a.cfg.PartitionsDir)
 	if err != nil {
@@ -142,8 +135,6 @@ func (a *Agent) cycle(ctx context.Context) {
 		return
 	}
 
-	// Bound concurrency: SQLite reads are CPU-bound, the API is mostly
-	// network-bound, so NumCPU is a reasonable upper bound.
 	concurrency := runtime.NumCPU()
 	if concurrency > len(accounts) {
 		concurrency = len(accounts)
@@ -157,34 +148,32 @@ func (a *Agent) cycle(ctx context.Context) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			// One bad lh.db (corrupt SQLite header, an unexpected nil in
-			// the driver, …) must not take the whole agent down. Log the
-			// panic with stack and let the next cycle try this account
-			// again from scratch.
-			defer func() {
-				if r := recover(); r != nil {
-					log.WithFields(log.Fields{
-						"accountId": acc.ID,
-						"panic":     r,
-						"stack":     string(debug.Stack()),
-					}).Error("syncAccount panicked")
-				}
-			}()
-			a.syncAccount(ctx, acc)
+			a.syncAccountSafe(ctx, acc)
 		}()
 	}
 	wg.Wait()
+}
+
+// syncAccountSafe isolates one account's sync: a single corrupt lh.db must
+// not take the whole agent down, so panics are logged and the next cycle
+// retries the account from scratch.
+func (a *Agent) syncAccountSafe(ctx context.Context, acc lh.Account) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.WithFields(log.Fields{
+				"accountId": acc.ID,
+				"panic":     r,
+				"stack":     string(debug.Stack()),
+			}).Error("syncAccount panicked")
+		}
+	}()
+	a.syncAccount(ctx, acc)
 }
 
 func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 	accCtx, cancel := context.WithTimeout(ctx, accountCycleTimeout)
 	defer cancel()
 
-	// Read everything we may need first; we still want a report attempt
-	// even on a partial read because funnels are valuable on their own.
-	// We read all campaigns (not just since-cursor) — the platform tells
-	// us which ones it already knows about via the cache, and the response
-	// will refresh that cache.
 	campaigns, err := a.reader.ReadCampaigns(accCtx, acc.DBPath, "")
 	if err != nil {
 		log.WithError(err).WithField("accountId", acc.ID).Error("read campaigns failed")
@@ -198,60 +187,13 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 	}
 
 	owner, _ := a.reader.ReadAccountOwner(accCtx, acc.DBPath)
-
-	// One read per cycle — used to pick the per-day cap for every campaign
-	// without re-querying the limits tables per campaign.
 	limits, _ := a.reader.ReadDailyLimits(accCtx, acc.DBPath)
 
-	// One pass per campaign over its step stats: classifies the campaign
-	// (inmail / regular / scraper, so scrapers are dropped) AND builds the
-	// per-message funnel. A read failure defaults to regular so we never
-	// silently lose a real outreach campaign.
-	kindByCampaign := make(map[int64]string, len(campaigns))
-	stepsByCampaign := make(map[int64][]client.FunnelStep, len(campaigns))
-	for _, c := range campaigns {
-		steps, err := a.reader.ReadCampaignStepStats(accCtx, acc.DBPath, c.ID)
-		if err != nil {
-			log.WithError(err).WithFields(log.Fields{
-				"accountId":  acc.ID,
-				"campaignId": c.ID,
-			}).Warn("read step stats failed, treating as regular")
-			kindByCampaign[c.ID] = lh.KindRegular
-			continue
-		}
-		types := make([]string, 0, len(steps))
-		for _, s := range steps {
-			types = append(types, s.Type)
-		}
-		kindByCampaign[c.ID] = lh.ClassifyLinkedinKind(types)
-		stepsByCampaign[c.ID] = buildFunnelSteps(steps)
-	}
-
-	// Preload step definitions only for non-scraper campaigns the platform
-	// needs (re)registered — steady-state cycles do zero extra IO.
-	actionsByCampaign := make(map[int64][]lh.CampaignActionRow)
-	for _, c := range campaigns {
-		if kindByCampaign[c.ID] == lh.KindScraper {
-			continue
-		}
-		if !a.known.needsRegister(acc.ID, int(c.ID), c.Version) {
-			continue
-		}
-		rows, err := a.reader.ReadCampaignActions(accCtx, acc.DBPath, c.ID)
-		if err != nil {
-			log.WithError(err).WithFields(log.Fields{
-				"accountId":  acc.ID,
-				"campaignId": c.ID,
-			}).Warn("read campaign actions failed, sending campaign without messages")
-			continue
-		}
-		actionsByCampaign[c.ID] = rows
-	}
+	kindByCampaign, stepsByCampaign := a.classifyCampaigns(accCtx, acc, campaigns)
+	actionsByCampaign := a.loadActionsForRegister(accCtx, acc, campaigns, kindByCampaign)
 
 	req := a.buildReport(acc.ID, campaigns, funnels, owner, actionsByCampaign, kindByCampaign, stepsByCampaign, limits)
 	if req == nil {
-		// Partition is empty and not yet known to the platform — nothing to
-		// send. The next cycle will check again.
 		log.WithField("accountId", acc.ID).Debug("skipping empty partition")
 		return
 	}
@@ -280,9 +222,70 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 	}).Info("account synced")
 }
 
-// buildReport diffs local LH state against the cached known-state and returns
-// only what the platform doesn't yet have, plus the always-overwriting
-// funnel counters.
+// classifyCampaigns walks each campaign's step stats once, producing both its
+// kind (inmail / regular / scraper) and the per-message funnel. A failed read
+// defaults to regular so a real outreach campaign is never silently dropped.
+func (a *Agent) classifyCampaigns(
+	ctx context.Context,
+	acc lh.Account,
+	campaigns []lh.Campaign,
+) (map[int64]string, map[int64][]client.FunnelStep) {
+	kinds := make(map[int64]string, len(campaigns))
+	steps := make(map[int64][]client.FunnelStep, len(campaigns))
+	for _, c := range campaigns {
+		stats, err := a.reader.ReadCampaignStepStats(ctx, acc.DBPath, c.ID)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"accountId":  acc.ID,
+				"campaignId": c.ID,
+			}).Warn("read step stats failed, treating as regular")
+			kinds[c.ID] = lh.KindRegular
+			continue
+		}
+		types := make([]string, 0, len(stats))
+		for _, s := range stats {
+			types = append(types, s.Type)
+		}
+		kinds[c.ID] = lh.ClassifyLinkedinKind(types)
+		steps[c.ID] = buildFunnelSteps(stats)
+	}
+	return kinds, steps
+}
+
+// loadActionsForRegister reads step definitions only for the non-scraper
+// campaigns that need (re)registering — steady-state cycles do zero extra IO.
+func (a *Agent) loadActionsForRegister(
+	ctx context.Context,
+	acc lh.Account,
+	campaigns []lh.Campaign,
+	kindByCampaign map[int64]string,
+) map[int64][]lh.CampaignActionRow {
+	actions := make(map[int64][]lh.CampaignActionRow)
+	for _, c := range campaigns {
+		if kindByCampaign[c.ID] == lh.KindScraper {
+			continue
+		}
+		if !a.known.needsRegister(acc.ID, int(c.ID), c.Version) {
+			continue
+		}
+		rows, err := a.reader.ReadCampaignActions(ctx, acc.DBPath, c.ID)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"accountId":  acc.ID,
+				"campaignId": c.ID,
+			}).Warn("read campaign actions failed, sending campaign without messages")
+			continue
+		}
+		actions[c.ID] = rows
+	}
+	return actions
+}
+
+// buildReport assembles the per-account payload: the full account snapshot,
+// register blocks for campaigns the platform is missing, and the
+// always-overwriting funnel counters. Returns nil for an empty partition the
+// platform doesn't know yet — common for a freshly added LH login the user
+// never opened, which should not spawn a placeholder Client.
 func (a *Agent) buildReport(
 	accountID int,
 	campaigns []lh.Campaign,
@@ -300,54 +303,27 @@ func (a *Agent) buildReport(
 		Funnels:           make([]client.CampaignFunnel, 0, len(campaigns)),
 	}
 
-	// The account block is the full snapshot, sent every cycle so the platform
-	// can refresh mutable health (lastLoginAt, ssi) on each pass; on the first
-	// cycle for an unknown account it also seeds the Client. It goes out when
-	// either (a) we have an owner signal worth shipping, or (b) the account is
-	// new and at least has campaigns — so a brand-new account with campaigns but
-	// no resolved owner still registers. Empty partitions on disk are common (a
-	// freshly added LH login the user hasn't opened yet) and stay silent so we
-	// don't spam Clients with placeholder rows.
 	hasOwner := owner != nil && hasOwnerSignal(owner)
-	if hasOwner || (!a.known.hasAccount(accountID) && len(campaigns) > 0) {
-		req.RegisterAccount = &client.RegisterAccount{}
-		if hasOwner {
-			req.RegisterAccount.Email = owner.Email
-			req.RegisterAccount.FullName = owner.FullName
-			req.RegisterAccount.Avatar = owner.Avatar
-			req.RegisterAccount.LastLoginAt = owner.LastLoginAt
-			req.RegisterAccount.SSI = owner.SSI
-			if owner.ExternalID != nil {
-				s := strconv.FormatInt(*owner.ExternalID, 10)
-				req.RegisterAccount.ExternalID = &s
-			}
+	if hasOwner {
+		req.RegisterAccount = buildRegisterAccount(owner)
+	} else if !a.known.hasAccount(accountID) {
+		if len(campaigns) == 0 {
+			return nil
 		}
-	}
-
-	// Empty partition + unknown account → nothing to do at all. Skip the
-	// HTTP call so we don't burn quota or trigger a no-op upsert chain.
-	if req.RegisterAccount == nil && !a.known.hasAccount(accountID) && len(campaigns) == 0 {
-		return nil
+		req.RegisterAccount = &client.RegisterAccount{}
 	}
 
 	for _, c := range campaigns {
 		cid := int(c.ID)
 
-		// Scraper campaigns (no messaging step — only extract/visit/webhook
-		// actions) carry no outreach the platform tracks, so we drop them
-		// entirely: neither registered nor funneled.
 		if kindByCampaign[c.ID] == lh.KindScraper {
 			continue
 		}
 
-		// Decide whether to (re)send the full campaign metadata this cycle:
-		//   - unknown or version bump (rename / pause toggle / step edit) →
-		//     always re-register;
-		//   - known at the same version but the platform has no messages →
-		//     backfill, BUT only when we actually have message-bearing actions
-		//     to contribute. A campaign with no messageable steps (e.g. a
-		//     note-less InvitePerson) would otherwise never reach hasMessages
-		//     and we'd resend it every cycle forever.
+		// Backfill (same version, platform has no messages) only fires when
+		// there are message-bearing actions to contribute — a campaign whose
+		// steps carry no bodies (e.g. note-less InvitePerson) would otherwise
+		// re-register every cycle forever.
 		kc, isKnown := a.known.lookup(accountID, cid)
 		versionChanged := !isKnown || kc.Version != c.Version
 		actions := actionsByCampaign[c.ID]
@@ -385,6 +361,27 @@ func (a *Agent) buildReport(
 	return req
 }
 
+func buildRegisterAccount(owner *lh.AccountOwner) *client.RegisterAccount {
+	account := &client.RegisterAccount{
+		Email:       owner.Email,
+		FullName:    owner.FullName,
+		Avatar:      owner.Avatar,
+		LastLoginAt: owner.LastLoginAt,
+		SSI:         owner.SSI,
+	}
+	if owner.ExternalID != nil {
+		s := strconv.FormatInt(*owner.ExternalID, 10)
+		account.ExternalID = &s
+	}
+	if owner.ProfileURL != nil || owner.PublicSlug != nil {
+		account.Owner = &client.AccountOwnerRef{
+			ProfileURL: owner.ProfileURL,
+			PublicID:   owner.PublicSlug,
+		}
+	}
+	return account
+}
+
 func (a *Agent) getReportInterval() time.Duration {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -405,19 +402,15 @@ func (a *Agent) setReportInterval(d time.Duration) {
 }
 
 // messageActionTypes mirrors the platform's MESSAGE_ACTION_TYPES — the steps
-// that become CampaignMessage rows and carry a seq number. Inter-message
-// waits live on the non-message steps between them (CheckForReplies), so we
-// accumulate those and attach them to the next message action.
+// that become CampaignMessage rows and carry a seq number.
 var messageActionTypes = map[string]struct{}{
 	"MessageToPerson": {},
 	"InvitePerson":    {},
 	"InMail":          {},
 }
 
-// hasMessageActions reports whether any step would become a CampaignMessage on
-// the platform — same predicate the platform's syncMessages uses (messaging
-// type AND a rendered body). Gates the message-backfill so we don't perpetually
-// re-register campaigns that have no messageable steps to begin with.
+// hasMessageActions mirrors the platform's syncMessages predicate: a step
+// becomes a CampaignMessage only when it is a messaging type AND has a body.
 func hasMessageActions(rows []lh.CampaignActionRow) bool {
 	for _, r := range rows {
 		if _, ok := messageActionTypes[r.Type]; ok && r.Body != nil {
@@ -427,11 +420,10 @@ func hasMessageActions(rows []lh.CampaignActionRow) bool {
 	return false
 }
 
-// buildFunnelSteps turns per-action stats (workflow order) into per-message
-// funnel rows. Seq numbering matches buildActions / the platform: one bump per
-// messaging step. A messaging step's own replied is kept, and any following
-// CheckForReplies' replied is folded onto it — LH records the reply on the
-// check step that gates the next message, not on the message itself.
+// buildFunnelSteps turns per-action stats into per-message funnel rows. LH
+// records a reply on the CheckForReplies step that gates the next message,
+// not on the message itself, so each non-message step's replied is folded
+// back onto the preceding messaging step.
 func buildFunnelSteps(steps []lh.StepStat) []client.FunnelStep {
 	var out []client.FunnelStep
 	seq := 0
@@ -448,13 +440,12 @@ func buildFunnelSteps(steps []lh.StepStat) []client.FunnelStep {
 	return out
 }
 
-// buildActions maps LH action rows to the wire format, walking them in
-// workflow order. LH encodes the wait between two messages as a separate step
-// (CheckForReplies.moveToSuccessfulAfterMs) sitting between them, so we carry
-// the accumulated wait forward and stamp it as the delay BEFORE the next
-// messaging action. action_configs.coolDown is deliberately ignored: it's a
-// fixed per-dispatch throttle (~60s for every send), not the sequence cadence,
-// and folding it in made every message read as "+1 minute".
+// buildActions maps LH action rows to the wire format. LH encodes the wait
+// between two messages as a separate step (CheckForReplies'
+// moveToSuccessfulAfterMs), so accumulated waits are stamped as the delay
+// BEFORE the next messaging action. action_configs.coolDown is deliberately
+// ignored: it is a fixed per-dispatch throttle (~60s on every send), not the
+// sequence cadence.
 func buildActions(rows []lh.CampaignActionRow) []client.CampaignAction {
 	out := make([]client.CampaignAction, 0, len(rows))
 	var pendingWaitMs int64
@@ -499,10 +490,6 @@ func waitToDelay(ms int64) (int, string) {
 	}
 }
 
-// hasOwnerSignal returns true when the LH owner row carried at least one
-// matchable field. We use this to leave RegisterAccount fields nil for the
-// "owner row exists but every field is null" edge case (the platform can
-// then create a placeholder Client without forcing a match attempt).
 func hasOwnerSignal(o *lh.AccountOwner) bool {
-	return o.ExternalID != nil || o.Email != nil || o.FullName != nil
+	return o.ExternalID != nil || o.Email != nil || o.FullName != nil || o.ProfileURL != nil
 }
