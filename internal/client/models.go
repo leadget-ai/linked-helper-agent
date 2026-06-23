@@ -38,6 +38,13 @@ type KnownCampaign struct {
 	// Whether the platform stored CampaignMessage rows; false triggers a
 	// message backfill even at a matching version.
 	HasMessages bool `json:"hasMessages"`
+	// Per-campaign reply sync high-water mark (LH messages.created_at, canonical
+	// ms). Empty means the campaign is registered but the platform holds no
+	// replies yet — the agent backfills all of them; a value makes it
+	// incremental from that point (re-read with a `>=` bound, deduped by
+	// ExternalID). The agent only ships replies for campaigns present here, so a
+	// freshly registered campaign's replies go out on the NEXT cycle.
+	ReplyCursor string `json:"replyCursor"`
 }
 
 // RegisterAccount is the full account snapshot, sent every cycle: identity
@@ -124,15 +131,41 @@ type FunnelStep struct {
 	Replied   int `json:"replied"`
 }
 
+// CampaignReply is one inbound reply to the account's cold outreach. Only
+// messages LH itself linked as a reply are sent — general inbox traffic never
+// reaches here. ExternalID is the stable LinkedIn message id the platform
+// dedupes on, so boundary re-sends are harmless. DetectedAt is LH's insertion
+// time and doubles as the sync cursor; SentAt is the LinkedIn timestamp, kept
+// for display only because it can arrive out of detection order.
+type CampaignReply struct {
+	CampaignID int         `json:"campaignId"`
+	ExternalID string      `json:"externalId"`
+	Person     ReplyPerson `json:"person"`
+	Subject    *string     `json:"subject,omitempty"`
+	Text       string      `json:"text"`
+	SentAt     string      `json:"sentAt"`
+	DetectedAt string      `json:"detectedAt"`
+}
+
+// ReplyPerson is the replier's LinkedIn identity, used to create or match the
+// lead the reply belongs to. ExternalID is the stable LinkedIn member id.
+type ReplyPerson struct {
+	ExternalID *string `json:"externalId,omitempty"`
+	ProfileURL *string `json:"profileUrl,omitempty"`
+	FullName   *string `json:"fullName,omitempty"`
+	Headline   *string `json:"headline,omitempty"`
+}
+
 // AccountReportRequest is the per-account batch sent every cycle. The
 // register blocks are empty on steady-state cycles; funnels are always
-// present.
+// present; replies carry only those detected since the account's cursor.
 type AccountReportRequest struct {
 	AgentID           string             `json:"agentId,omitempty"`
 	SyncedAt          string             `json:"syncedAt"`
 	RegisterAccount   *RegisterAccount   `json:"registerAccount,omitempty"`
 	RegisterCampaigns []RegisterCampaign `json:"registerCampaigns"`
 	Funnels           []CampaignFunnel   `json:"funnels"`
+	Replies           []CampaignReply    `json:"replies"`
 }
 
 type AccountReportResponse struct {

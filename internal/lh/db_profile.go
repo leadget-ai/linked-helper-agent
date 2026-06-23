@@ -29,6 +29,12 @@ var profiledTables = []string{
 	"person_mini_profile",
 	"person_email",
 	"li_account_ssi_snapshot_store",
+	"action_result_messages",
+	"messages",
+	"message_external_ids",
+	"action_results",
+	"action_versions",
+	"actions",
 }
 
 func (p *DBProfile) HasTable(name string) bool {

@@ -21,6 +21,13 @@ const (
 	maxReportInterval     = 60 * time.Minute
 
 	accountCycleTimeout = 2 * time.Minute
+
+	// replyBatchLimit caps replies shipped per account per cycle. Sync is
+	// forward-only from a platform-issued cursor, so steady state is a handful
+	// of rows; the cap only bounds a catch-up after the agent was offline for a
+	// while. Set far above any same-millisecond detection cluster so a `>=`
+	// cursor always advances past its ties.
+	replyBatchLimit = 500
 )
 
 // Agent ties the LH reader to the API client and runs them on a ticker.
@@ -198,6 +205,8 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 		return
 	}
 
+	a.appendReplies(accCtx, acc, campaigns, kindByCampaign, req)
+
 	resp, err := a.client.Report(accCtx, acc.ID, req)
 	if err != nil {
 		log.WithError(err).WithField("accountId", acc.ID).Error("report failed")
@@ -301,6 +310,7 @@ func (a *Agent) buildReport(
 		SyncedAt:          time.Now().UTC().Format(time.RFC3339),
 		RegisterCampaigns: []client.RegisterCampaign{},
 		Funnels:           make([]client.CampaignFunnel, 0, len(campaigns)),
+		Replies:           []client.CampaignReply{},
 	}
 
 	hasOwner := owner != nil && hasOwnerSignal(owner)
@@ -359,6 +369,63 @@ func (a *Agent) buildReport(
 	}
 
 	return req
+}
+
+// appendReplies fills req.Replies, but only for campaigns the platform already
+// knows (present in a.known): a campaign registered this very cycle has no
+// known-state entry yet, so its replies wait for the next cycle — that's what
+// keeps the first report for a new account reply-free. For each known campaign
+// we read from its per-campaign cursor (empty = backfill all), and the platform
+// dedupes on ExternalID so the `>=` boundary re-reads cost nothing.
+func (a *Agent) appendReplies(
+	ctx context.Context,
+	acc lh.Account,
+	campaigns []lh.Campaign,
+	kindByCampaign map[int64]string,
+	req *client.AccountReportRequest,
+) {
+	for _, c := range campaigns {
+		if kindByCampaign[c.ID] == lh.KindScraper {
+			continue
+		}
+		kc, known := a.known.lookup(acc.ID, int(c.ID))
+		if !known {
+			continue
+		}
+		rows, err := a.reader.ReadCampaignReplies(ctx, acc.DBPath, c.ID, kc.ReplyCursor, replyBatchLimit)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"accountId":  acc.ID,
+				"campaignId": c.ID,
+			}).Warn("read replies failed, skipping campaign's replies this cycle")
+			continue
+		}
+		req.Replies = append(req.Replies, buildReplies(rows)...)
+	}
+}
+
+// buildReplies maps LH reply rows to the wire format. The platform dedupes on
+// ExternalID, so the boundary row(s) the `>=` cursor re-reads each cycle are
+// harmless.
+func buildReplies(replies []lh.CampaignReply) []client.CampaignReply {
+	out := make([]client.CampaignReply, 0, len(replies))
+	for _, r := range replies {
+		out = append(out, client.CampaignReply{
+			CampaignID: int(r.CampaignID),
+			ExternalID: r.ExternalID,
+			Person: client.ReplyPerson{
+				ExternalID: r.MemberID,
+				ProfileURL: r.ProfileURL,
+				FullName:   r.FullName,
+				Headline:   r.Headline,
+			},
+			Subject:    r.Subject,
+			Text:       r.Text,
+			SentAt:     r.SentAt,
+			DetectedAt: r.DetectedAt,
+		})
+	}
+	return out
 }
 
 func buildRegisterAccount(owner *lh.AccountOwner) *client.RegisterAccount {

@@ -1,0 +1,93 @@
+{
+  "agentId": "test-agent",
+  "syncedAt": "NORMALIZED",
+  "registerAccount": {
+    "externalId": "100200300",
+    "email": "owner@example.test",
+    "fullName": "Test Owner",
+    "avatar": "https://example.test/avatar.jpg",
+    "owner": {
+      "profileUrl": "https://www.linkedin.com/in/test-owner",
+      "publicId": "test-owner"
+    },
+    "lastLoginAt": "2026-01-01T00:00:00Z",
+    "ssi": 42
+  },
+  "registerCampaigns": [
+    {
+      "campaignId": 500,
+      "name": "Test Campaign",
+      "description": "A test campaign",
+      "type": 2,
+      "isPaused": false,
+      "isArchived": false,
+      "createdAt": "2026-01-02T00:00:00Z",
+      "version": 7,
+      "messagesPerDay": 25,
+      "linkedinKind": "regular",
+      "actions": [
+        {
+          "type": "InvitePerson",
+          "body": "{firstName}, let's connect!",
+          "example": "John, let's connect!"
+        },
+        {
+          "type": "CheckForReplies",
+          "body": null,
+          "example": null
+        },
+        {
+          "type": "MessageToPerson",
+          "body": "Thanks for connecting, {firstName}!",
+          "example": "Thanks for connecting, John!",
+          "delayValue": 4,
+          "delayUnit": "DAYS"
+        },
+        {
+          "type": "VisitProfile",
+          "body": null,
+          "example": null
+        }
+      ]
+    }
+  ],
+  "funnels": [
+    {
+      "campaignId": 500,
+      "messaged": 3,
+      "replied": 2,
+      "target": 4,
+      "isPaused": false,
+      "isArchived": false,
+      "lastActivityAt": "2026-01-10T12:00:00.000Z",
+      "linkedinKind": "regular",
+      "steps": [
+        {
+          "seqNumber": 1,
+          "sent": 3,
+          "replied": 2
+        },
+        {
+          "seqNumber": 2,
+          "sent": 1,
+          "replied": 0
+        }
+      ]
+    }
+  ],
+  "replies": [
+    {
+      "campaignId": 500,
+      "externalId": "2-reply-ext-id-0001",
+      "person": {
+        "externalId": "555666777",
+        "profileUrl": "https://www.linkedin.com/in/jane-prospect",
+        "fullName": "Jane Prospect",
+        "headline": "Head of Engineering at Acme"
+      },
+      "text": "Thanks for reaching out — happy to chat next week.",
+      "sentAt": "2026-01-07T09:55:00Z",
+      "detectedAt": "2026-01-07T18:30:00.000Z"
+    }
+  ]
+}

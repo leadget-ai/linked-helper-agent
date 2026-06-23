@@ -5,7 +5,9 @@
 *.test
 *.out
 *.db
+!internal/lh/testdata/fixtures/*.db
 .env
 .env.*
 .idea/
 .vscode/
+/genfixtures

@@ -19,6 +19,11 @@ type known struct {
 type knownCampaign struct {
 	Version     int
 	HasMessages bool
+	// ReplyCursor is the platform's per-campaign reply high-water mark. Empty =
+	// registered but no replies stored yet (agent backfills); a value = read
+	// incrementally from it. The campaign being present in the map at all is
+	// what gates the reply path — an unregistered campaign has no entry.
+	ReplyCursor string
 }
 
 type campaignKey struct {
@@ -43,6 +48,7 @@ func (k *known) replace(s client.KnownState) {
 		campaigns[campaignKey{c.AccountID, c.CampaignID}] = knownCampaign{
 			Version:     c.Version,
 			HasMessages: c.HasMessages,
+			ReplyCursor: c.ReplyCursor,
 		}
 	}
 
