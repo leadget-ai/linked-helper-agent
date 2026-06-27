@@ -24,13 +24,26 @@ func TestLoadConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("endpoint defaults when unset", func(t *testing.T) {
+		t.Setenv("LHA_API_ENDPOINT", "")
+		t.Setenv("LHA_API_KEY", "secret")
+		t.Setenv("LHA_PARTITIONS_DIR", "/tmp/partitions")
+
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.APIEndpoint != defaultAPIEndpoint {
+			t.Errorf("APIEndpoint = %q, want %q", cfg.APIEndpoint, defaultAPIEndpoint)
+		}
+	})
+
 	missing := []struct {
 		name     string
 		endpoint string
 		key      string
 		partDir  string
 	}{
-		{"no endpoint", "", "k", "/d"},
 		{"no key", "https://x", "", "/d"},
 		{"no partitions dir", "https://x", "k", ""},
 	}

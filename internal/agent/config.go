@@ -20,13 +20,17 @@ type Config struct {
 
 const envPrefix = "LHA_"
 
+// defaultAPIEndpoint is used when LHA_API_ENDPOINT is not set so a stock
+// install talks to production without extra configuration.
+const defaultAPIEndpoint = "https://api.analytics.leadget.ai"
+
 // LoadConfig validates env vars and returns a usable Config or an error
 // listing exactly what's wrong — installers parse this so the message must
 // be self-contained.
 func LoadConfig() (*Config, error) {
 	endpoint := os.Getenv(envPrefix + "API_ENDPOINT")
 	if endpoint == "" {
-		return nil, fmt.Errorf("%sAPI_ENDPOINT is required", envPrefix)
+		endpoint = defaultAPIEndpoint
 	}
 
 	apiKey := os.Getenv(envPrefix + "API_KEY")
