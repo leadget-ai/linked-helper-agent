@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $ServiceName = 'LhAgent'
-$ApiEndpoint = 'https://api.leadget-analytics.rawnodes.com'
+$ApiEndpoint = 'https://api.analytics.leadget.ai'
 $InstallDir  = 'C:\Program Files\lh-agent'
 $LogDir      = 'C:\ProgramData\lh-agent\logs'
 $AgentPath   = Join-Path $InstallDir 'lh-agent.exe'
@@ -81,9 +81,14 @@ function PromptOrKeep($name, $default, [switch]$Secret) {
   return Read-Host "$name"
 }
 
-# Endpoint is fixed for this deployment; an existing value still wins on upgrade.
-$apiEndpoint   = if ($existingEnv['LHA_API_ENDPOINT']) { $existingEnv['LHA_API_ENDPOINT'] } else { $ApiEndpoint }
-Write-Step "Using API endpoint $apiEndpoint"
+# Endpoint is fixed for this deployment; the configured value always wins so an
+# upgrade migrates installs off any stale endpoint baked into a prior install.
+$apiEndpoint   = $ApiEndpoint
+if ($existingEnv['LHA_API_ENDPOINT'] -and $existingEnv['LHA_API_ENDPOINT'] -ne $apiEndpoint) {
+  Write-Step "Updating API endpoint from $($existingEnv['LHA_API_ENDPOINT']) to $apiEndpoint"
+} else {
+  Write-Step "Using API endpoint $apiEndpoint"
+}
 $apiKey        = PromptOrKeep 'LHA_API_KEY (issued from the platform UI)' $existingEnv['LHA_API_KEY'] -Secret
 
 # %APPDATA% here is the *installing* admin's Roaming folder. If Linked Helper
