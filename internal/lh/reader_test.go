@@ -104,10 +104,10 @@ func TestReadCampaignStepStats(t *testing.T) {
 		t.Fatalf("ReadCampaignStepStats: %v", err)
 	}
 	want := []StepStat{
-		{Type: "InvitePerson", Sent: 3, Replied: 0},    // p2,p3,p4 sent; status -999 (p1) excluded
-		{Type: "CheckForReplies", Sent: 2, Replied: 2}, // p3 via status=2, p4 via reply flag
-		{Type: "MessageToPerson", Sent: 1, Replied: 0}, // p2
-		{Type: "VisitProfile", Sent: 0, Replied: 0},    // no history rows
+		{ActionID: 101, Type: "InvitePerson", Sent: 3, Replied: 0},    // p2,p3,p4 sent; status -999 (p1) excluded
+		{ActionID: 102, Type: "CheckForReplies", Sent: 2, Replied: 2}, // p3 via status=2, p4 via reply flag
+		{ActionID: 103, Type: "MessageToPerson", Sent: 1, Replied: 0}, // p2
+		{ActionID: 104, Type: "VisitProfile", Sent: 0, Replied: 0},    // no history rows
 	}
 	if len(got) != len(want) {
 		t.Fatalf("len(stats) = %d, want %d", len(got), len(want))

@@ -272,9 +272,10 @@ func (r *Reader) ReadCampaignActions(ctx context.Context, dbPath string, campaig
 // message itself — the caller folds it back onto the preceding messaging
 // step.
 type StepStat struct {
-	Type    string
-	Sent    int
-	Replied int
+	ActionID int64
+	Type     string
+	Sent     int
+	Replied  int
 }
 
 // ReadCampaignStepStats returns per-action sent/replied counts in workflow
@@ -288,6 +289,7 @@ func (r *Reader) ReadCampaignStepStats(ctx context.Context, dbPath string, campa
 
 	rows, err := db.QueryContext(ctx, `
 		SELECT
+			a.id AS action_id,
 			ac."actionType",
 			COUNT(DISTINCT CASE WHEN pich.result_status != -999 THEN pich.person_id END) AS sent,
 			COUNT(DISTINCT CASE
@@ -304,7 +306,7 @@ func (r *Reader) ReadCampaignStepStats(ctx context.Context, dbPath string, campa
 		LEFT JOIN person_in_campaigns_history pich
 			ON pich.action_id = a.id AND pich.campaign_id = clv.campaign_id
 		WHERE clv.campaign_id = ?
-		GROUP BY cva.id, ac."actionType"
+		GROUP BY cva.id, a.id, ac."actionType"
 		ORDER BY cva.id
 	`, campaignID)
 	if err != nil {
@@ -315,7 +317,7 @@ func (r *Reader) ReadCampaignStepStats(ctx context.Context, dbPath string, campa
 	var out []StepStat
 	for rows.Next() {
 		var s StepStat
-		if err := rows.Scan(&s.Type, &s.Sent, &s.Replied); err != nil {
+		if err := rows.Scan(&s.ActionID, &s.Type, &s.Sent, &s.Replied); err != nil {
 			return nil, fmt.Errorf("scan step stat: %w", err)
 		}
 		out = append(out, s)

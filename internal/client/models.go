@@ -45,6 +45,12 @@ type KnownCampaign struct {
 	// ExternalID). The agent only ships replies for campaigns present here, so a
 	// freshly registered campaign's replies go out on the NEXT cycle.
 	ReplyCursor string `json:"replyCursor"`
+	// Per-campaign SEND sync high-water mark (LH person_in_campaigns_history
+	// result_created_at, canonical ms). Empty = registered but no per-person
+	// sends stored yet (agent backfills all); a value = incremental from it
+	// (re-read with a `>=` bound, deduped by the send's ExternalID). Gated the
+	// same way as ReplyCursor: only campaigns present here ship sends.
+	SendCursor string `json:"sendCursor"`
 }
 
 // RegisterAccount is the full account snapshot, sent every cycle: identity
@@ -156,9 +162,26 @@ type ReplyPerson struct {
 	Headline   *string `json:"headline,omitempty"`
 }
 
+// CampaignSend is one people-level outbound message the account sent,
+// attributed to the campaign step that produced it. The platform stores these
+// as dated outbound_messages rows (the event-log complement to the aggregate
+// funnel) and never derives counters from them. ExternalID is namespaced
+// (accountId:campaignId:pichId) because LH's per-person-history id is only
+// unique within one lh.db; the platform dedupes on it. SentAt and DetectedAt
+// are the same value — LH records a single result_created_at per send.
+type CampaignSend struct {
+	CampaignID int         `json:"campaignId"`
+	ExternalID string      `json:"externalId"`
+	Person     ReplyPerson `json:"person"`
+	SeqNumber  int         `json:"seqNumber"`
+	SentAt     string      `json:"sentAt"`
+	DetectedAt string      `json:"detectedAt"`
+}
+
 // AccountReportRequest is the per-account batch sent every cycle. The
 // register blocks are empty on steady-state cycles; funnels are always
-// present; replies carry only those detected since the account's cursor.
+// present; replies and sends carry only those detected since the account's
+// per-campaign cursors.
 type AccountReportRequest struct {
 	AgentID           string             `json:"agentId,omitempty"`
 	SyncedAt          string             `json:"syncedAt"`
@@ -166,6 +189,7 @@ type AccountReportRequest struct {
 	RegisterCampaigns []RegisterCampaign `json:"registerCampaigns"`
 	Funnels           []CampaignFunnel   `json:"funnels"`
 	Replies           []CampaignReply    `json:"replies"`
+	Sends             []CampaignSend     `json:"sends"`
 }
 
 type AccountReportResponse struct {

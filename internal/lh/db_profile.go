@@ -35,6 +35,7 @@ var profiledTables = []string{
 	"action_results",
 	"action_versions",
 	"actions",
+	"person_in_campaigns_history",
 }
 
 func (p *DBProfile) HasTable(name string) bool {

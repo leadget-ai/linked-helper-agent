@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -28,6 +29,12 @@ const (
 	// while. Set far above any same-millisecond detection cluster so a `>=`
 	// cursor always advances past its ties.
 	replyBatchLimit = 500
+
+	// sendBatchLimit caps per-person sends shipped per campaign per cycle. Sends
+	// are higher-volume than replies (one per recipient×step), so the first
+	// backfill of an established campaign is spread across cycles by this cap;
+	// steady state is a handful of rows. Same `>=` cursor + dedup as replies.
+	sendBatchLimit = 1000
 )
 
 // Agent ties the LH reader to the API client and runs them on a ticker.
@@ -196,7 +203,7 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 	owner, _ := a.reader.ReadAccountOwner(accCtx, acc.DBPath)
 	limits, _ := a.reader.ReadDailyLimits(accCtx, acc.DBPath)
 
-	kindByCampaign, stepsByCampaign := a.classifyCampaigns(accCtx, acc, campaigns)
+	kindByCampaign, stepsByCampaign, seqByCampaign := a.classifyCampaigns(accCtx, acc, campaigns)
 	actionsByCampaign := a.loadActionsForRegister(accCtx, acc, campaigns, kindByCampaign)
 
 	req := a.buildReport(acc.ID, campaigns, funnels, owner, actionsByCampaign, kindByCampaign, stepsByCampaign, limits)
@@ -206,6 +213,7 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 	}
 
 	a.appendReplies(accCtx, acc, campaigns, kindByCampaign, req)
+	a.appendSends(accCtx, acc, campaigns, kindByCampaign, seqByCampaign, req)
 
 	resp, err := a.client.Report(accCtx, acc.ID, req)
 	if err != nil {
@@ -224,6 +232,8 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 		"registerAccount":     req.RegisterAccount != nil,
 		"registerCampaigns":   len(req.RegisterCampaigns),
 		"funnels":             len(req.Funnels),
+		"replies":             len(req.Replies),
+		"sends":               len(req.Sends),
 		"accountRegistered":   resp.Applied.AccountRegistered,
 		"campaignsRegistered": resp.Applied.CampaignsRegistered,
 		"funnelsApplied":      resp.Applied.FunnelsApplied,
@@ -238,9 +248,10 @@ func (a *Agent) classifyCampaigns(
 	ctx context.Context,
 	acc lh.Account,
 	campaigns []lh.Campaign,
-) (map[int64]string, map[int64][]client.FunnelStep) {
+) (map[int64]string, map[int64][]client.FunnelStep, map[int64]map[int64]int) {
 	kinds := make(map[int64]string, len(campaigns))
 	steps := make(map[int64][]client.FunnelStep, len(campaigns))
+	seqs := make(map[int64]map[int64]int, len(campaigns))
 	for _, c := range campaigns {
 		stats, err := a.reader.ReadCampaignStepStats(ctx, acc.DBPath, c.ID)
 		if err != nil {
@@ -257,8 +268,9 @@ func (a *Agent) classifyCampaigns(
 		}
 		kinds[c.ID] = lh.ClassifyLinkedinKind(types)
 		steps[c.ID] = buildFunnelSteps(stats)
+		seqs[c.ID] = buildActionSeqMap(stats)
 	}
-	return kinds, steps
+	return kinds, steps, seqs
 }
 
 // loadActionsForRegister reads step definitions only for the non-scraper
@@ -311,6 +323,7 @@ func (a *Agent) buildReport(
 		RegisterCampaigns: []client.RegisterCampaign{},
 		Funnels:           make([]client.CampaignFunnel, 0, len(campaigns)),
 		Replies:           []client.CampaignReply{},
+		Sends:             []client.CampaignSend{},
 	}
 
 	hasOwner := owner != nil && hasOwnerSignal(owner)
@@ -424,6 +437,87 @@ func buildReplies(replies []lh.CampaignReply) []client.CampaignReply {
 			SentAt:     r.SentAt,
 			DetectedAt: r.DetectedAt,
 		})
+	}
+	return out
+}
+
+// appendSends fills req.Sends, mirroring appendReplies: only campaigns the
+// platform already knows (present in a.known) ship sends, each read from its
+// per-campaign SendCursor (empty = backfill all). The platform dedupes on the
+// namespaced ExternalID so the `>=` boundary re-reads are harmless. Never
+// touches funnel counters — those stay the aggregate source of truth.
+func (a *Agent) appendSends(
+	ctx context.Context,
+	acc lh.Account,
+	campaigns []lh.Campaign,
+	kindByCampaign map[int64]string,
+	seqByCampaign map[int64]map[int64]int,
+	req *client.AccountReportRequest,
+) {
+	for _, c := range campaigns {
+		if kindByCampaign[c.ID] == lh.KindScraper {
+			continue
+		}
+		kc, known := a.known.lookup(acc.ID, int(c.ID))
+		if !known {
+			continue
+		}
+		rows, err := a.reader.ReadCampaignSends(ctx, acc.DBPath, c.ID, kc.SendCursor, sendBatchLimit)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"accountId":  acc.ID,
+				"campaignId": c.ID,
+			}).Warn("read sends failed, skipping campaign's sends this cycle")
+			continue
+		}
+		req.Sends = append(req.Sends, buildSends(acc.ID, rows, seqByCampaign[c.ID])...)
+	}
+}
+
+// buildSends maps LH send rows to the wire format, keeping ONLY messaging-step
+// results — a person_in_campaigns_history row exists for every action
+// (CheckForReplies, VisitProfile, …), but only messaging actions are real
+// outbound sends. Membership in seqByAction (built from the same messaging-type
+// walk as the funnel) is the filter, so "sends" line up with the funnel's
+// "sent". ExternalID is namespaced (account:campaign:localId) because LH's
+// per-person-history id is unique only within one lh.db; the platform dedupes
+// on the result.
+func buildSends(accountID int, sends []lh.CampaignSend, seqByAction map[int64]int) []client.CampaignSend {
+	out := make([]client.CampaignSend, 0, len(sends))
+	for _, s := range sends {
+		seq, isMessaging := seqByAction[s.ActionID]
+		if !isMessaging {
+			continue
+		}
+		out = append(out, client.CampaignSend{
+			CampaignID: int(s.CampaignID),
+			ExternalID: fmt.Sprintf("%d:%d:%s", accountID, s.CampaignID, s.ExternalID),
+			Person: client.ReplyPerson{
+				ExternalID: s.MemberID,
+				ProfileURL: s.ProfileURL,
+				FullName:   s.FullName,
+				Headline:   s.Headline,
+			},
+			SeqNumber:  seq,
+			SentAt:     s.SentAt,
+			DetectedAt: s.DetectedAt,
+		})
+	}
+	return out
+}
+
+// buildActionSeqMap maps each messaging action's id to its 1-based seq number,
+// using the same messaging-type walk as buildFunnelSteps so a send's seqNumber
+// lines up with the platform's CampaignMessage rows. Non-messaging steps are
+// omitted (their sends, if any, resolve to seq 0).
+func buildActionSeqMap(steps []lh.StepStat) map[int64]int {
+	out := make(map[int64]int, len(steps))
+	seq := 0
+	for _, s := range steps {
+		if _, isMessage := messageActionTypes[s.Type]; isMessage {
+			seq++
+			out[s.ActionID] = seq
+		}
 	}
 	return out
 }

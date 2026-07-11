@@ -24,6 +24,9 @@ type knownCampaign struct {
 	// incrementally from it. The campaign being present in the map at all is
 	// what gates the reply path — an unregistered campaign has no entry.
 	ReplyCursor string
+	// SendCursor is the platform's per-campaign send high-water mark, gating the
+	// per-person send path exactly like ReplyCursor gates replies.
+	SendCursor string
 }
 
 type campaignKey struct {
@@ -49,6 +52,7 @@ func (k *known) replace(s client.KnownState) {
 			Version:     c.Version,
 			HasMessages: c.HasMessages,
 			ReplyCursor: c.ReplyCursor,
+			SendCursor:  c.SendCursor,
 		}
 	}
 
