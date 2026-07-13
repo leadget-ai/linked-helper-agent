@@ -212,7 +212,7 @@ func (a *Agent) syncAccount(ctx context.Context, acc lh.Account) {
 		return
 	}
 
-	a.appendReplies(accCtx, acc, campaigns, kindByCampaign, req)
+	a.appendReplies(accCtx, acc, campaigns, kindByCampaign, seqByCampaign, req)
 	a.appendSends(accCtx, acc, campaigns, kindByCampaign, seqByCampaign, req)
 
 	resp, err := a.client.Report(accCtx, acc.ID, req)
@@ -395,6 +395,7 @@ func (a *Agent) appendReplies(
 	acc lh.Account,
 	campaigns []lh.Campaign,
 	kindByCampaign map[int64]string,
+	seqByCampaign map[int64]map[int64]int,
 	req *client.AccountReportRequest,
 ) {
 	for _, c := range campaigns {
@@ -413,7 +414,46 @@ func (a *Agent) appendReplies(
 			}).Warn("read replies failed, skipping campaign's replies this cycle")
 			continue
 		}
-		req.Replies = append(req.Replies, buildReplies(rows)...)
+		replies := buildReplies(rows)
+		a.attachThreads(ctx, acc, c.ID, kc.ReplyCursor, rows, replies, seqByCampaign[c.ID])
+		req.Replies = append(req.Replies, replies...)
+	}
+}
+
+// attachThreads hangs the full conversation off each reply. rows and replies are
+// index-parallel (buildReplies preserves order), so rows[i].PersonID is the
+// person to reconstruct for replies[i]. A failed thread read leaves that reply
+// thread-less rather than dropping the reply — the reply itself already carries
+// the person's answer.
+//
+// The `>=` reply cursor re-reads its boundary row every cycle for dedup safety;
+// that boundary reply's thread was already delivered when it was new, so we skip
+// re-attaching it and only ship threads for replies strictly newer than the
+// cursor. An empty cursor (first sync / backfill) is older than every row, so
+// all replies get their thread once.
+func (a *Agent) attachThreads(
+	ctx context.Context,
+	acc lh.Account,
+	campaignID int64,
+	replyCursor string,
+	rows []lh.CampaignReply,
+	replies []client.CampaignReply,
+	seqByAction map[int64]int,
+) {
+	for i := range replies {
+		if replyCursor != "" && rows[i].DetectedAt <= replyCursor {
+			continue
+		}
+		messages, err := a.reader.ReadCampaignThread(ctx, acc.DBPath, campaignID, rows[i].PersonID)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"accountId":  acc.ID,
+				"campaignId": campaignID,
+				"personId":   rows[i].PersonID,
+			}).Warn("read thread failed, shipping reply without its thread")
+			continue
+		}
+		replies[i].Thread = buildThread(acc.ID, int(campaignID), messages, seqByAction)
 	}
 }
 
@@ -437,6 +477,31 @@ func buildReplies(replies []lh.CampaignReply) []client.CampaignReply {
 			SentAt:     r.SentAt,
 			DetectedAt: r.DetectedAt,
 		})
+	}
+	return out
+}
+
+// buildThread maps LH thread messages to the wire format. ExternalID is
+// namespaced the same way sends are (account:campaign:localMessageId) since LH's
+// message id is unique only within one lh.db. Outbound messages take the seq
+// number of the messaging step that produced them (via the same action->seq map
+// the funnel and sends use); inbound replies carry no seq.
+func buildThread(accountID, campaignID int, messages []lh.ThreadMessage, seqByAction map[int64]int) []client.ThreadMessage {
+	out := make([]client.ThreadMessage, 0, len(messages))
+	for _, m := range messages {
+		msg := client.ThreadMessage{
+			ExternalID: fmt.Sprintf("%d:%d:%d", accountID, campaignID, m.MessageID),
+			Direction:  m.Direction,
+			Body:       m.Body,
+			OccurredAt: m.OccurredAt,
+		}
+		if m.Direction == lh.DirectionOutbound {
+			if seq, ok := seqByAction[m.ActionID]; ok {
+				s := seq
+				msg.SeqNumber = &s
+			}
+		}
+		out = append(out, msg)
 	}
 	return out
 }
@@ -499,6 +564,7 @@ func buildSends(accountID int, sends []lh.CampaignSend, seqByAction map[int64]in
 				Headline:   s.Headline,
 			},
 			SeqNumber:  seq,
+			Body:       s.Body,
 			SentAt:     s.SentAt,
 			DetectedAt: s.DetectedAt,
 		})

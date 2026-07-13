@@ -87,7 +87,23 @@
       },
       "text": "Thanks for reaching out — happy to chat next week.",
       "sentAt": "2026-01-07T09:55:00Z",
-      "detectedAt": "2026-01-07T18:30:00.000Z"
+      "detectedAt": "2026-01-07T18:30:00.000Z",
+      "thread": [
+        {
+          "externalId": "454999:500:4",
+          "direction": "outbound",
+          "body": "Hi Jane, let's connect!",
+          "seqNumber": 1,
+          "occurredAt": "2026-01-05T12:00:00.000Z"
+        },
+        {
+          "externalId": "454999:500:1",
+          "direction": "inbound",
+          "body": "Thanks for reaching out — happy to chat next week.",
+          "seqNumber": null,
+          "occurredAt": "2026-01-07T18:30:00.000Z"
+        }
+      ]
     }
   ],
   "sends": [
@@ -96,6 +112,7 @@
       "externalId": "454999:500:2",
       "person": {},
       "seqNumber": 1,
+      "body": "Hi Sam, let's connect!",
       "sentAt": "2026-01-05T11:00:00.000Z",
       "detectedAt": "2026-01-05T11:00:00.000Z"
     },
@@ -109,6 +126,7 @@
         "headline": "Head of Engineering at Acme"
       },
       "seqNumber": 1,
+      "body": "Hi Jane, let's connect!",
       "sentAt": "2026-01-05T12:00:00.000Z",
       "detectedAt": "2026-01-05T12:00:00.000Z"
     },
@@ -125,6 +143,7 @@
       "externalId": "454999:500:7",
       "person": {},
       "seqNumber": 2,
+      "body": "Thanks for connecting, Sam!",
       "sentAt": "2026-01-08T10:00:00.000Z",
       "detectedAt": "2026-01-08T10:00:00.000Z"
     }

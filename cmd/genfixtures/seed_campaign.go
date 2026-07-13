@@ -53,13 +53,38 @@ func seedCampaignRow(s *seeder, id int, uuid, name, desc string, typ int, paused
 
 // pich seeds one person_in_campaigns_history row. Only the columns readers
 // touch carry meaning; the remaining NOT NULL columns get inert placeholders.
-func pich(s *seeder, id, personID, campaignID, actionID, actionVersionID, status, repliedFlag int, createdAt string) {
+// resultID links the row to its action_results row (the thread reader joins
+// action_result_messages on it); 0 leaves it NULL, as it is for queued targets.
+func pich(s *seeder, id, personID, campaignID, actionID, actionVersionID, resultID, status, repliedFlag int, createdAt string) {
+	var result any
+	if resultID != 0 {
+		result = resultID
+	}
 	s.exec(`INSERT INTO person_in_campaigns_history(
 	            id, action_target_people_id, action_target_action_version_id, person_id,
-	            campaign_id, action_id, result_status, result_flag_recipient_replied,
+	            campaign_id, action_id, result_id, result_status, result_flag_recipient_replied,
 	            result_created_at, action_add_to_target_state, action_target_li_account_id)
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`,
-		id, personID, actionVersionID, personID, campaignID, actionID, status, repliedFlag, createdAt)
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`,
+		id, personID, actionVersionID, personID, campaignID, actionID, result, status, repliedFlag, createdAt)
+}
+
+// seedSent writes the rows the thread reader joins for one outbound message: the
+// action_results attribution row, the message with its stable external id, and
+// the action_result_messages link marked 'Sent'. The caller points a pich row's
+// result_id at actionResultID so the message joins into the person's thread.
+func seedSent(s *seeder, actionResultID, actionVersionID, personID, messageID int, externalID, messageText, createdAt string) {
+	s.exec(`INSERT INTO action_results(id, action_version_id, person_id, result, target_platform, li_account_id, created_at)
+	        VALUES (?, ?, ?, 0, 'linkedin', 1, ?)`,
+		actionResultID, actionVersionID, personID, createdAt)
+	s.exec(`INSERT INTO messages(id, type, message_text, send_at, created_at, updated_at)
+	        VALUES (?, 'DEFAULT', ?, ?, ?, ?)`,
+		messageID, messageText, createdAt, createdAt, createdAt)
+	s.exec(`INSERT INTO message_external_ids(id, message_id, external_id, li_account_id, created_at, updated_at)
+	        VALUES (?, ?, ?, 1, ?, ?)`,
+		messageID, messageID, externalID, createdAt, createdAt)
+	s.exec(`INSERT INTO action_result_messages(id, action_result_id, message_id, type, created_at, updated_at)
+	        VALUES (?, ?, ?, 'Sent', ?, ?)`,
+		messageID, actionResultID, messageID, createdAt, createdAt)
 }
 
 // seedCampaign: owner as in owner-v205 plus one full regular campaign — four
@@ -83,18 +108,29 @@ func seedCampaign(db *sql.DB) error {
 	})
 
 	// Engagement: p1 queued-only, p2 messaged (Invite+Message), p3 replied via
-	// status=2 on CheckForReplies, p4 replied via flag on CheckForReplies.
-	pich(s, 1, 1, cID, 101, 301, -999, 0, "2026-01-05T10:00:00.000Z")
-	pich(s, 2, 2, cID, 101, 301, 1, 0, "2026-01-05T11:00:00.000Z")
-	pich(s, 3, 3, cID, 101, 301, 1, 0, "2026-01-05T12:00:00.000Z")
-	pich(s, 4, 4, cID, 101, 301, 1, 0, "2026-01-06T10:00:00.000Z")
-	pich(s, 5, 3, cID, 102, 302, 2, 0, "2026-01-07T10:00:00.000Z")
-	pich(s, 6, 4, cID, 102, 302, 1, 1, "2026-01-10T12:00:00.000Z") // latest → LastActivityAt
-	pich(s, 7, 2, cID, 103, 303, 1, 0, "2026-01-08T10:00:00.000Z")
+	// status=2 on CheckForReplies, p4 replied via flag on CheckForReplies. The
+	// resultID column links a processed row to its action_results row so the
+	// thread reader can walk the person's messages (see seedSent below).
+	pich(s, 1, 1, cID, 101, 301, 0, -999, 0, "2026-01-05T10:00:00.000Z")
+	pich(s, 2, 2, cID, 101, 301, 2, 1, 0, "2026-01-05T11:00:00.000Z")
+	pich(s, 3, 3, cID, 101, 301, 4, 1, 0, "2026-01-05T12:00:00.000Z")
+	pich(s, 4, 4, cID, 101, 301, 0, 1, 0, "2026-01-06T10:00:00.000Z")
+	pich(s, 5, 3, cID, 102, 302, 1, 2, 0, "2026-01-07T10:00:00.000Z")
+	pich(s, 6, 4, cID, 102, 302, 0, 1, 1, "2026-01-10T12:00:00.000Z") // latest → LastActivityAt
+	pich(s, 7, 2, cID, 103, 303, 3, 1, 0, "2026-01-08T10:00:00.000Z")
+
+	// Outbound messages that make up the threads: p2's Invite + Message and p3's
+	// Invite. Each carries a stable external id and personalized text; the pich
+	// rows above point their result_id at these action_results.
+	seedSent(s, 2, 301, 2, 2, "2-sent-invite-p2", "Hi Sam, let's connect!", "2026-01-05T11:00:00.000Z")
+	seedSent(s, 3, 303, 2, 3, "2-sent-message-p2", "Thanks for connecting, Sam!", "2026-01-08T10:00:00.000Z")
+	seedSent(s, 4, 301, 3, 4, "2-sent-invite-p3", "Hi Jane, let's connect!", "2026-01-05T12:00:00.000Z")
 
 	// One inbound reply from p3 on the CheckForReplies step (action_version 302),
 	// with its own LinkedIn identity. send_at precedes created_at to mirror LH's
-	// detection-lags-the-message reality the cursor must tolerate.
+	// detection-lags-the-message reality the cursor must tolerate. pich row 5
+	// (p3's CheckForReplies) links to this action_result (id 1) so the reply
+	// closes p3's thread after the Invite send above.
 	seedReply(s, replyOpts{
 		actionResultID:  1,
 		actionVersionID: 302,

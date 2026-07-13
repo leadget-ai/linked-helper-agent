@@ -151,6 +151,26 @@ type CampaignReply struct {
 	Text       string      `json:"text"`
 	SentAt     string      `json:"sentAt"`
 	DetectedAt string      `json:"detectedAt"`
+	// Thread is the complete bidirectional conversation with this person in
+	// this campaign — every outbound message we sent plus every reply LH linked
+	// back — ordered ascending by occurredAt. Re-sent in full each cycle a reply
+	// is present; the platform dedupes on each message's ExternalID.
+	Thread []ThreadMessage `json:"thread,omitempty"`
+}
+
+// ThreadMessage is one message in a reply's conversation. Direction is
+// "outbound" for messages we sent, "inbound" for the person's replies.
+// ExternalID is namespaced (accountId:campaignId:localMessageId) because LH's
+// message id is only unique within one lh.db; the platform dedupes on it.
+// SeqNumber carries the outbound step's 1-based sequence (matching the
+// platform's CampaignMessage rows) and is null for inbound messages. Body is
+// the real personalized message text and is null when LH stored none.
+type ThreadMessage struct {
+	ExternalID string  `json:"externalId"`
+	Direction  string  `json:"direction"`
+	Body       *string `json:"body"`
+	SeqNumber  *int    `json:"seqNumber"`
+	OccurredAt string  `json:"occurredAt"`
 }
 
 // ReplyPerson is the replier's LinkedIn identity, used to create or match the
@@ -174,6 +194,7 @@ type CampaignSend struct {
 	ExternalID string      `json:"externalId"`
 	Person     ReplyPerson `json:"person"`
 	SeqNumber  int         `json:"seqNumber"`
+	Body       *string     `json:"body,omitempty"`
 	SentAt     string      `json:"sentAt"`
 	DetectedAt string      `json:"detectedAt"`
 }

@@ -25,6 +25,7 @@ type CampaignSend struct {
 	ProfileURL *string
 	FullName   *string
 	Headline   *string
+	Body       *string
 	SentAt     string
 	DetectedAt string
 }
@@ -60,7 +61,10 @@ func (r *Reader) ReadCampaignSends(ctx context.Context, dbPath string, campaignI
 				WHERE pe.person_id = pich.person_id AND pe.type_group = 'public' LIMIT 1) AS public_slug,
 			pmp.first_name,
 			pmp.last_name,
-			pmp.headline
+			pmp.headline,
+			(SELECT m.message_text FROM action_result_messages arm
+				JOIN messages m ON m.id = arm.message_id
+				WHERE arm.action_result_id = pich.result_id AND arm.type = 'Sent' LIMIT 1) AS body
 		FROM person_in_campaigns_history pich
 		LEFT JOIN person_mini_profile pmp ON pmp.person_id = pich.person_id
 		WHERE pich.campaign_id = ?
@@ -83,6 +87,7 @@ func (r *Reader) ReadCampaignSends(ctx context.Context, dbPath string, campaignI
 			memberID, publicID  sql.NullString
 			firstName, lastName sql.NullString
 			headline            sql.NullString
+			body                sql.NullString
 		)
 		if err := rows.Scan(
 			&send.CampaignID,
@@ -95,6 +100,7 @@ func (r *Reader) ReadCampaignSends(ctx context.Context, dbPath string, campaignI
 			&firstName,
 			&lastName,
 			&headline,
+			&body,
 		); err != nil {
 			return nil, fmt.Errorf("scan campaign send: %w", err)
 		}
@@ -113,6 +119,9 @@ func (r *Reader) ReadCampaignSends(ctx context.Context, dbPath string, campaignI
 		}
 		if headline.Valid && headline.String != "" {
 			send.Headline = &headline.String
+		}
+		if body.Valid && body.String != "" {
+			send.Body = &body.String
 		}
 
 		out = append(out, send)
