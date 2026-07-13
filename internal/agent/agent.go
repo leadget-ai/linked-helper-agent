@@ -564,7 +564,6 @@ func buildSends(accountID int, sends []lh.CampaignSend, seqByAction map[int64]in
 				Headline:   s.Headline,
 			},
 			SeqNumber:  seq,
-			Body:       s.Body,
 			SentAt:     s.SentAt,
 			DetectedAt: s.DetectedAt,
 		})

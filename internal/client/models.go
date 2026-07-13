@@ -194,7 +194,6 @@ type CampaignSend struct {
 	ExternalID string      `json:"externalId"`
 	Person     ReplyPerson `json:"person"`
 	SeqNumber  int         `json:"seqNumber"`
-	Body       *string     `json:"body,omitempty"`
 	SentAt     string      `json:"sentAt"`
 	DetectedAt string      `json:"detectedAt"`
 }
