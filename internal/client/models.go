@@ -2,8 +2,9 @@
 // The structs mirror the DTOs in @leadget-ai/models — keep them in sync.
 package client
 
-// BootstrapRequest identifies the agent install to the server, sent once at
-// startup. AgentID is a persistent UUID stored outside the install dir (see
+// BootstrapRequest identifies the agent install to the server, sent at the
+// start of every cycle so the agent picks up server-side known-state changes
+// before building reports. AgentID is a persistent UUID stored outside the install dir (see
 // agent.LoadOrCreateAgentID) so the platform can dedupe agents even when
 // hostname or IP change.
 type BootstrapRequest struct {

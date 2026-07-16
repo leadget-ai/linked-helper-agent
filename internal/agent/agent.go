@@ -79,7 +79,6 @@ func (a *Agent) Run(ctx context.Context) {
 		}
 	}()
 
-	a.bootstrap(ctx)
 	a.cycle(ctx)
 
 	ticker := time.NewTicker(a.getReportInterval())
@@ -102,8 +101,13 @@ func (a *Agent) Run(ctx context.Context) {
 	}
 }
 
-// bootstrap seeds the known-state cache. Failure is non-fatal: an empty cache
-// treats everything as new and the first report response refreshes it.
+// bootstrap refreshes the known-state cache from the server. It runs at the
+// start of every cycle, not just at process start: reports are built from
+// this cache concurrently, so an account that reports first would otherwise
+// never observe a server-side change (e.g. a reply-cursor reset) — its own
+// boundary re-send would overwrite the change before any report response
+// could bring the fresh state back. Failure is non-fatal: the cycle proceeds
+// on the cached (possibly stale) state, exactly as it would have anyway.
 func (a *Agent) bootstrap(ctx context.Context) {
 	hostname, _ := os.Hostname()
 	accounts, err := lh.Scan(a.cfg.PartitionsDir)
@@ -139,6 +143,8 @@ func (a *Agent) bootstrap(ctx context.Context) {
 // cycle scans partitions and syncs each account in parallel, bounded by
 // NumCPU (SQLite reads are the CPU-bound part).
 func (a *Agent) cycle(ctx context.Context) {
+	a.bootstrap(ctx)
+
 	accounts, err := lh.Scan(a.cfg.PartitionsDir)
 	if err != nil {
 		log.WithError(err).Error("scan partitions failed")
