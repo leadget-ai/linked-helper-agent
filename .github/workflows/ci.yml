@@ -2,22 +2,115 @@ name: CI
 
 on:
   push:
+    branches: [ main, master ]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
           go-version: '1.24'
           cache: true
 
-      # Pure Go (modernc sqlite driver, no CGO) — no system packages needed.
-      - name: go vet
-        run: go vet ./...
+      - name: Build
+        run: go build ./...
 
-      - name: go test
+      # Pure Go (modernc sqlite driver, no CGO) — no system packages needed.
+      - name: Vet (host + windows)
+        run: |
+          go vet ./...
+          GOOS=windows go vet ./cmd/agent
+
+      - name: Test
         run: go test ./...
+
+  # semantic-release reads conventional commits (feat→minor, fix→patch,
+  # BREAKING CHANGE→major), computes the next version, and creates the git tag +
+  # GitHub Release + CHANGELOG. Runs only on main pushes. The build job below
+  # consumes its version and attaches binaries to the release it created.
+  release:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      published: ${{ steps.semantic.outputs.new_release_published }}
+      version: ${{ steps.semantic.outputs.new_release_version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Semantic Release
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          semantic_version: 24
+          # changelog + git are not bundled in semantic-release core, so the
+          # action must install them explicitly.
+          extra_plugins: |
+            @semantic-release/changelog@6
+            @semantic-release/git@10
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # upload binaries to the release
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # The release job just created tag v${VERSION}; fetch it so gh can
+          # target that release.
+          fetch-depth: 0
+          ref: v${{ needs.release.outputs.version }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build metadata
+        id: meta
+        run: echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build windows/amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build \
+            -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${{ steps.meta.outputs.commit }}" \
+            -o "dist/lh-agent-windows-amd64.exe" \
+            ./cmd/agent
+          # Versioned copy alongside the stable filename — installers grab
+          # the stable URL (latest/download/lh-agent-windows-amd64.exe);
+          # the versioned asset is for bisecting / supporting an old client.
+          cp "dist/lh-agent-windows-amd64.exe" "dist/lh-agent-${VERSION}-windows-amd64.exe"
+          cp scripts/install.ps1   dist/install.ps1
+          cp scripts/uninstall.ps1 dist/uninstall.ps1
+
+      - name: Attach binaries to the release
+        run: gh release upload "v${VERSION}" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
