@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/leadget-ai/linked-helper-agent/compare/v1.3.0...v1.4.0) (2026-07-17)
+
+
+### Features
+
+* **agent:** add name and description fields to campaign model ([a55a912](https://github.com/leadget-ai/linked-helper-agent/commit/a55a9127a09deb275ddea8e649fd8fac9a033eec))
+
 # [1.3.0](https://github.com/leadget-ai/linked-helper-agent/compare/v1.2.0...v1.3.0) (2026-07-16)
 
 
