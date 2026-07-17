@@ -121,6 +121,12 @@ type CampaignFunnel struct {
 	Target     int  `json:"target"`
 	IsPaused   bool `json:"isPaused"`
 	IsArchived bool `json:"isArchived"`
+	// Name/Description ride along for the same reason as IsPaused/IsArchived:
+	// a plain rename edits campaigns.name in place and never bumps
+	// campaign_last_versions.version_id, so the version-gated register path
+	// would leave the platform stuck on whatever name it first saw.
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
 	// Most recent action-result time; the platform uses it as the end date
 	// for terminal campaigns.
 	LastActivityAt *string `json:"lastActivityAt,omitempty"`

@@ -381,6 +381,8 @@ func (a *Agent) buildReport(
 			Target:         f.Target,
 			IsPaused:       c.IsPaused,
 			IsArchived:     c.IsArchived,
+			Name:           c.Name,
+			Description:    c.Description,
 			LastActivityAt: f.LastActivityAt,
 			LinkedinKind:   kindByCampaign[c.ID],
 			Steps:          stepsByCampaign[c.ID],
