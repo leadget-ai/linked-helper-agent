@@ -4,13 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 )
 
 // CampaignReply is one inbound reply to the account's cold outreach, attributed
-// to the campaign whose step the person was answering. Only messages Linked
-// Helper itself linked as a reply (action_result_messages.type = 'Replied') are
-// returned — general inbox traffic (recruiters messaging the owner, personal
-// chats) never reaches this path.
+// to the campaign whose step the person was answering. Two kinds reach this
+// path: the messages Linked Helper itself linked as a reply
+// (action_result_messages.type = 'Replied'), and the ones a campaign person
+// wrote straight in LinkedIn after the conversation left LH's workflow, read
+// from the chat mirror. General inbox traffic (recruiters messaging the owner,
+// personal chats) still never reaches it — the raw source only admits people the
+// campaign actually targeted.
 //
 // ExternalID is the stable LinkedIn message id; the platform dedupes on it, so
 // the same reply may be re-sent across cycles without creating duplicates.
@@ -66,6 +70,23 @@ func (r *Reader) ReadCampaignReplies(ctx context.Context, dbPath string, campaig
 	}
 
 	profile := r.profileFor(ctx, dbPath, db)
+	linked, err := r.readLinkedReplies(ctx, db, profile, campaignID, sinceDetectedAt, limit)
+	if err != nil {
+		return nil, err
+	}
+	if !hasChatStore(profile) || !profile.HasTable("message_external_ids") || !profile.HasTable("person_in_campaigns_history") {
+		return linked, nil
+	}
+	manual, err := r.readManualReplies(ctx, db, campaignID, sinceDetectedAt, limit)
+	if err != nil {
+		return nil, err
+	}
+	return mergeReplies(linked, manual, limit), nil
+}
+
+// readLinkedReplies is the action-linked source: replies LH recognized as
+// answers to a campaign step.
+func (r *Reader) readLinkedReplies(ctx context.Context, db *sql.DB, profile *DBProfile, campaignID int64, sinceDetectedAt string, limit int) ([]CampaignReply, error) {
 	for _, table := range replyTables {
 		if !profile.HasTable(table) {
 			return nil, nil
@@ -111,6 +132,95 @@ func (r *Reader) ReadCampaignReplies(ctx context.Context, dbPath string, campaig
 	}
 	defer rows.Close()
 
+	return scanReplies(rows)
+}
+
+// readManualReplies is the raw-chat source: messages a campaign person wrote in
+// the LinkedIn conversation that LH mirrored but never linked to an action —
+// everything the lead sent once the exchange moved out of the workflow.
+//
+// A message hangs on its author's chat participant row, so selecting the
+// person's own row yields exactly their side of the thread; our manual answers
+// sit on the owner's row and stay out of the reply feed (they reach the platform
+// as thread messages instead).
+//
+// A person can be targeted by several campaigns, so the message is attributed to
+// one of them deterministically: the campaign whose action last touched that
+// person before the message, falling back to their earliest campaign when the
+// message predates every result. That keeps a manual reply from being reported
+// once per campaign the person belongs to.
+func (r *Reader) readManualReplies(ctx context.Context, db *sql.DB, campaignID int64, sinceDetectedAt string, limit int) ([]CampaignReply, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			?,
+			author.person_id,
+			mei.external_id,
+			m.subject,
+			m.message_text,
+			m.send_at,
+			STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at) AS detected_at,
+			(SELECT pe.external_id FROM person_external_ids pe
+				WHERE pe.person_id = author.person_id AND pe.type_group = 'member' LIMIT 1) AS member_id,
+			(SELECT pe.external_id FROM person_external_ids pe
+				WHERE pe.person_id = author.person_id AND pe.type_group = 'public' LIMIT 1) AS public_slug,
+			pmp.first_name,
+			pmp.last_name,
+			pmp.headline
+		FROM chat_participants author
+		JOIN participant_messages pm  ON pm.chat_participant_id = author.id
+		JOIN messages m               ON m.id = pm.message_id
+		JOIN message_external_ids mei ON mei.message_id = m.id
+		LEFT JOIN person_mini_profile pmp ON pmp.person_id = author.person_id
+		WHERE EXISTS (
+			SELECT 1 FROM person_in_campaigns_history target
+			WHERE target.person_id = author.person_id AND target.campaign_id = ?
+		)
+		  AND NOT EXISTS (
+			SELECT 1 FROM action_result_messages arm WHERE arm.message_id = m.id
+		)
+		  AND COALESCE(
+			(SELECT last.campaign_id FROM person_in_campaigns_history last
+				WHERE last.person_id = author.person_id
+				  AND last.campaign_id IS NOT NULL
+				  AND last.result_created_at IS NOT NULL
+				  AND last.result_created_at <= m.send_at
+				ORDER BY last.result_created_at DESC, last.campaign_id
+				LIMIT 1),
+			(SELECT MIN(earliest.campaign_id) FROM person_in_campaigns_history earliest
+				WHERE earliest.person_id = author.person_id AND earliest.campaign_id IS NOT NULL)
+		  ) = ?
+		  AND STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at) >= ?
+		ORDER BY STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at)
+		LIMIT ?
+	`, campaignID, campaignID, campaignID, sinceDetectedAt, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select manual campaign replies: %w", err)
+	}
+	defer rows.Close()
+
+	return scanReplies(rows)
+}
+
+// mergeReplies interleaves the two sources back into one detection-ordered batch
+// and caps it at the caller's limit; whatever the cap drops is picked up next
+// cycle, since the platform advances the cursor only past what it stored.
+func mergeReplies(linked, manual []CampaignReply, limit int) []CampaignReply {
+	merged := make([]CampaignReply, 0, len(linked)+len(manual))
+	merged = append(merged, linked...)
+	merged = append(merged, manual...)
+	sort.SliceStable(merged, func(i, j int) bool {
+		if merged[i].DetectedAt != merged[j].DetectedAt {
+			return merged[i].DetectedAt < merged[j].DetectedAt
+		}
+		return merged[i].ExternalID < merged[j].ExternalID
+	})
+	if limit > 0 && len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return merged
+}
+
+func scanReplies(rows *sql.Rows) ([]CampaignReply, error) {
 	var out []CampaignReply
 	for rows.Next() {
 		var (

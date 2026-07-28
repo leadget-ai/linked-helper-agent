@@ -87,7 +87,7 @@ func TestCycle_BootstrapRefreshesKnownState(t *testing.T) {
 	if err := json.Unmarshal(reportBody, &req); err != nil {
 		t.Fatalf("decode request: %v", err)
 	}
-	if len(req.Replies) != 1 {
-		t.Fatalf("expected the reset cursor to backfill 1 reply, got %d", len(req.Replies))
+	if len(req.Replies) != 2 {
+		t.Fatalf("expected the reset cursor to backfill 2 replies, got %d", len(req.Replies))
 	}
 }

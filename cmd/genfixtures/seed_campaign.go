@@ -147,8 +147,106 @@ func seedCampaign(db *sql.DB) error {
 		headline:        "Head of Engineering at Acme",
 	})
 
+	// The chat mirror for p3: LH's copy of the same conversation, plus the two
+	// messages that only ever existed in LinkedIn — our manual answer to Jane's
+	// reply and her manual follow-up. Neither carries an
+	// action_result_messages link, so the action-linked readers cannot see them.
+	seedChat(s, chatOpts{
+		chatID:        1,
+		personID:      3,
+		participantID: 1,
+		ownerID:       2,
+		linkedMessages: []linkedChatMessage{
+			{messageID: 4, fromPerson: false},
+			{messageID: 1, fromPerson: true},
+		},
+		manualMessages: []manualChatMessage{
+			{
+				messageID:  10,
+				externalID: "2-manual-ours-0010",
+				text:       "Great — booked us Thursday 3pm, talk then!",
+				fromPerson: false,
+				sentAt:     "2026-01-07T19:02:00.000Z",
+				detectedAt: "2026-01-07T19:05:00.000Z",
+			},
+			{
+				messageID:  11,
+				externalID: "2-manual-theirs-0011",
+				text:       "Perfect, see you Thursday.",
+				fromPerson: true,
+				sentAt:     "2026-01-08T08:10:00.000Z",
+				detectedAt: "2026-01-08T08:30:00.000Z",
+			},
+		},
+	})
+
 	seedDailyLimits(s, 90, 25)
 	return s.err
+}
+
+// linkedChatMessage points the chat mirror at a message the action-linked
+// readers already return, so the merge is exercised on messages both sources
+// hold.
+type linkedChatMessage struct {
+	messageID  int
+	fromPerson bool
+}
+
+// manualChatMessage is a message that exists only in the chat mirror — typed by
+// hand in LinkedIn, never linked to an action result.
+type manualChatMessage struct {
+	messageID  int
+	externalID string
+	text       string
+	fromPerson bool
+	sentAt     string
+	detectedAt string
+}
+
+// chatOpts declares one mirrored conversation between the account owner and a
+// campaign person. participantID/ownerID are the two chat_participants rows a
+// message hangs on; which one it hangs on is what the readers derive direction
+// from.
+type chatOpts struct {
+	chatID         int
+	personID       int
+	participantID  int
+	ownerID        int
+	linkedMessages []linkedChatMessage
+	manualMessages []manualChatMessage
+}
+
+func seedChat(s *seeder, o chatOpts) {
+	s.exec(`INSERT INTO chats(id, type, platform, li_account_id, created_at, updated_at)
+	        VALUES (?, 'DIRECT', 'linkedin', 1, ?, ?)`, o.chatID, fixedTime, fixedTime)
+	s.exec(`INSERT INTO chat_participants(id, chat_id, person_id, created_at, updated_at)
+	        VALUES (?, ?, ?, ?, ?)`, o.participantID, o.chatID, o.personID, fixedTime, fixedTime)
+	s.exec(`INSERT INTO chat_participants(id, chat_id, person_id, created_at, updated_at)
+	        VALUES (?, ?, ?, ?, ?)`, o.ownerID, o.chatID, selfPersonID, fixedTime, fixedTime)
+
+	participant := func(fromPerson bool) int {
+		if fromPerson {
+			return o.participantID
+		}
+		return o.ownerID
+	}
+	link := func(id, participantID, messageID int) {
+		s.exec(`INSERT INTO participant_messages(id, chat_participant_id, message_id, created_at, updated_at)
+		        VALUES (?, ?, ?, ?, ?)`, id, participantID, messageID, fixedTime, fixedTime)
+	}
+
+	for _, m := range o.linkedMessages {
+		link(m.messageID, participant(m.fromPerson), m.messageID)
+	}
+	for _, m := range o.manualMessages {
+		s.exec(`INSERT INTO messages(id, type, message_text, send_at, created_at, updated_at)
+		        VALUES (?, 'DEFAULT', ?, ?, ?, ?)`,
+			m.messageID, m.text, m.sentAt, m.detectedAt, m.detectedAt)
+		s.exec(`INSERT INTO message_external_ids(id, message_id, external_id, li_account_id, created_at, updated_at)
+		        VALUES (?, ?, ?, 1, ?, ?)`,
+			m.messageID, m.messageID, m.externalID, fixedTime, fixedTime)
+		link(m.messageID, participant(m.fromPerson), m.messageID)
+	}
 }
 
 // replyOpts declares one inbound reply plus the replier's LinkedIn identity.

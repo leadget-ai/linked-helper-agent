@@ -6,9 +6,10 @@ import (
 )
 
 // TestReadCampaignThread_Bidirectional walks person 3's full conversation: an
-// outbound Invite followed by the inbound reply, ordered ascending by message
-// time. Direction is derived from the action_result_messages.type, and the
-// bodies are the real personalized message text.
+// outbound Invite followed by the inbound reply, then the two messages that only
+// exist in LH's chat mirror, ordered ascending by message time. Direction on the
+// linked pair is derived from the action_result_messages.type, and the bodies are
+// the real personalized message text.
 func TestReadCampaignThread_Bidirectional(t *testing.T) {
 	r := NewReader()
 	defer r.Close()
@@ -17,8 +18,8 @@ func TestReadCampaignThread_Bidirectional(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadCampaignThread: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("len(thread) = %d, want 2 (Invite send + reply)", len(got))
+	if len(got) != 4 {
+		t.Fatalf("len(thread) = %d, want 4 (Invite send + reply + two manual messages)", len(got))
 	}
 
 	send := got[0]
@@ -45,8 +46,77 @@ func TestReadCampaignThread_Bidirectional(t *testing.T) {
 	if reply.OccurredAt != "2026-01-07T18:30:00.000Z" {
 		t.Errorf("second OccurredAt = %q", reply.OccurredAt)
 	}
-	if !(got[0].OccurredAt < got[1].OccurredAt) {
-		t.Errorf("thread not ascending by occurredAt: %q then %q", got[0].OccurredAt, got[1].OccurredAt)
+	for i := 1; i < len(got); i++ {
+		if got[i-1].OccurredAt > got[i].OccurredAt {
+			t.Errorf("thread not ascending by occurredAt: %q then %q", got[i-1].OccurredAt, got[i].OccurredAt)
+		}
+	}
+}
+
+// TestReadCampaignThread_ManualMessages covers the half of the conversation that
+// never touched LH's workflow: our manual answer and the person's manual
+// follow-up. Both come from the chat mirror, so neither carries an action id —
+// they belong to no campaign step and the caller resolves no seq number for
+// them. Direction still splits correctly, which is the whole point: a manual
+// answer we typed in LinkedIn is ours, not the lead's.
+func TestReadCampaignThread_ManualMessages(t *testing.T) {
+	r := NewReader()
+	defer r.Close()
+
+	got, err := r.ReadCampaignThread(context.Background(), fixture("campaign-v205"), 500, 3)
+	if err != nil {
+		t.Fatalf("ReadCampaignThread: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("len(thread) = %d, want 4", len(got))
+	}
+
+	ours := got[2]
+	if ours.Direction != DirectionOutbound {
+		t.Errorf("manual answer Direction = %q, want %q", ours.Direction, DirectionOutbound)
+	}
+	if ours.ActionID != 0 {
+		t.Errorf("manual answer ActionID = %d, want 0 (outside the workflow)", ours.ActionID)
+	}
+	if ours.Body == nil || *ours.Body != "Great — booked us Thursday 3pm, talk then!" {
+		t.Errorf("manual answer Body = %v", ours.Body)
+	}
+
+	theirs := got[3]
+	if theirs.Direction != DirectionInbound {
+		t.Errorf("manual follow-up Direction = %q, want %q", theirs.Direction, DirectionInbound)
+	}
+	if theirs.ActionID != 0 {
+		t.Errorf("manual follow-up ActionID = %d, want 0", theirs.ActionID)
+	}
+	if theirs.Body == nil || *theirs.Body != "Perfect, see you Thursday." {
+		t.Errorf("manual follow-up Body = %v", theirs.Body)
+	}
+}
+
+// TestReadCampaignThread_NoDuplicates locks the merge: the messages both sources
+// hold (the Invite send and the linked reply, mirrored into the chat store)
+// appear once, keeping their action attribution.
+func TestReadCampaignThread_NoDuplicates(t *testing.T) {
+	r := NewReader()
+	defer r.Close()
+
+	got, err := r.ReadCampaignThread(context.Background(), fixture("campaign-v205"), 500, 3)
+	if err != nil {
+		t.Fatalf("ReadCampaignThread: %v", err)
+	}
+
+	seen := map[int64]int{}
+	for _, msg := range got {
+		seen[msg.MessageID]++
+	}
+	for id, count := range seen {
+		if count != 1 {
+			t.Errorf("message %d appears %d times, want 1", id, count)
+		}
+	}
+	if got[0].ActionID != 101 {
+		t.Errorf("mirrored Invite lost its action attribution: ActionID = %d, want 101", got[0].ActionID)
 	}
 }
 

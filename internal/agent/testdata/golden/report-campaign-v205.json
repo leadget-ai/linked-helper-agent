@@ -104,6 +104,63 @@
           "body": "Thanks for reaching out — happy to chat next week.",
           "seqNumber": null,
           "occurredAt": "2026-01-07T18:30:00.000Z"
+        },
+        {
+          "externalId": "454999:500:10",
+          "direction": "outbound",
+          "body": "Great — booked us Thursday 3pm, talk then!",
+          "seqNumber": null,
+          "occurredAt": "2026-01-07T19:05:00.000Z"
+        },
+        {
+          "externalId": "454999:500:11",
+          "direction": "inbound",
+          "body": "Perfect, see you Thursday.",
+          "seqNumber": null,
+          "occurredAt": "2026-01-08T08:30:00.000Z"
+        }
+      ]
+    },
+    {
+      "campaignId": 500,
+      "externalId": "2-manual-theirs-0011",
+      "person": {
+        "externalId": "555666777",
+        "profileUrl": "https://www.linkedin.com/in/jane-prospect",
+        "fullName": "Jane Prospect",
+        "headline": "Head of Engineering at Acme"
+      },
+      "text": "Perfect, see you Thursday.",
+      "sentAt": "2026-01-08T08:10:00Z",
+      "detectedAt": "2026-01-08T08:30:00.000Z",
+      "thread": [
+        {
+          "externalId": "454999:500:4",
+          "direction": "outbound",
+          "body": "Hi Jane, let's connect!",
+          "seqNumber": 1,
+          "occurredAt": "2026-01-05T12:00:00.000Z"
+        },
+        {
+          "externalId": "454999:500:1",
+          "direction": "inbound",
+          "body": "Thanks for reaching out — happy to chat next week.",
+          "seqNumber": null,
+          "occurredAt": "2026-01-07T18:30:00.000Z"
+        },
+        {
+          "externalId": "454999:500:10",
+          "direction": "outbound",
+          "body": "Great — booked us Thursday 3pm, talk then!",
+          "seqNumber": null,
+          "occurredAt": "2026-01-07T19:05:00.000Z"
+        },
+        {
+          "externalId": "454999:500:11",
+          "direction": "inbound",
+          "body": "Perfect, see you Thursday.",
+          "seqNumber": null,
+          "occurredAt": "2026-01-08T08:30:00.000Z"
         }
       ]
     }
