@@ -1,3 +1,10 @@
+# [1.5.0](https://github.com/leadget-ai/linked-helper-agent/compare/v1.4.0...v1.5.0) (2026-07-28)
+
+
+### Features
+
+* **chat:** implement chat mirror functionality and support for manual replies ([00f6616](https://github.com/leadget-ai/linked-helper-agent/commit/00f6616491f6c6ba4b9b9c6f61ce35fffc3d89cc))
+
 # [1.4.0](https://github.com/leadget-ai/linked-helper-agent/compare/v1.3.0...v1.4.0) (2026-07-17)
 
 
