@@ -92,6 +92,13 @@
       "detectedAt": "2026-01-07T18:30:00.000Z",
       "thread": [
         {
+          "externalId": "454999:500:12",
+          "direction": "inbound",
+          "body": "Hey! Long time no see — how have you been?",
+          "seqNumber": null,
+          "occurredAt": "2023-05-04T11:00:00.000Z"
+        },
+        {
           "externalId": "454999:500:4",
           "direction": "outbound",
           "body": "Hi Jane, let's connect!",
@@ -134,6 +141,13 @@
       "sentAt": "2026-01-08T08:10:00.000Z",
       "detectedAt": "2026-02-01T09:00:00.000Z",
       "thread": [
+        {
+          "externalId": "454999:500:12",
+          "direction": "inbound",
+          "body": "Hey! Long time no see — how have you been?",
+          "seqNumber": null,
+          "occurredAt": "2023-05-04T11:00:00.000Z"
+        },
         {
           "externalId": "454999:500:4",
           "direction": "outbound",

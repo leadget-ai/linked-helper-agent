@@ -88,6 +88,50 @@ func TestReadCampaignReplies_Manual(t *testing.T) {
 	}
 }
 
+// TestReadCampaignReplies_ManualPredatingOutreach guards the line between "this
+// person is in a campaign" and "this person answered that campaign". The account
+// owner's LinkedIn history with a person lives in the same chat as the campaign
+// exchange, and a message written before the campaign ever acted on them answers
+// nothing — counting it would credit the campaign with conversations it never
+// caused.
+func TestReadCampaignReplies_ManualPredatingOutreach(t *testing.T) {
+	r := NewReader()
+	defer r.Close()
+
+	got, err := r.ReadCampaignReplies(context.Background(), fixture("campaign-v205"), 500, "", 500)
+	if err != nil {
+		t.Fatalf("ReadCampaignReplies: %v", err)
+	}
+	for _, reply := range got {
+		if reply.ExternalID == "2-manual-preoutreach-0012" {
+			t.Fatalf("a message sent %q — before the campaign touched the person — was reported as a reply", reply.SentAt)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(replies) = %d, want 2 (linked reply + manual follow-up)", len(got))
+	}
+}
+
+// TestReadCampaignThread_KeepsPreOutreachHistory is the other half of the rule
+// above: the pre-outreach message is not a reply, but it IS part of the
+// conversation, so the inbox must still show it.
+func TestReadCampaignThread_KeepsPreOutreachHistory(t *testing.T) {
+	r := NewReader()
+	defer r.Close()
+
+	got, err := r.ReadCampaignThread(context.Background(), fixture("campaign-v205"), 500, 3)
+	if err != nil {
+		t.Fatalf("ReadCampaignThread: %v", err)
+	}
+	if got[0].MessageID != 12 || got[0].Direction != DirectionInbound {
+		t.Fatalf("thread starts with id %d (%s), want the pre-outreach inbound message 12",
+			got[0].MessageID, got[0].Direction)
+	}
+	if got[0].OccurredAt != "2023-05-04T11:00:00.000Z" {
+		t.Errorf("OccurredAt = %q", got[0].OccurredAt)
+	}
+}
+
 // TestReadCampaignReplies_ManualCursor locks the cursor over the merged batch:
 // reading from the linked reply's detection time returns it plus everything
 // newer, and reading past the manual reply returns nothing.

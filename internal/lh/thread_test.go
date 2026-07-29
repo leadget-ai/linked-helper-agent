@@ -18,11 +18,11 @@ func TestReadCampaignThread_Bidirectional(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadCampaignThread: %v", err)
 	}
-	if len(got) != 4 {
-		t.Fatalf("len(thread) = %d, want 4 (Invite send + reply + two manual messages)", len(got))
+	if len(got) != 5 {
+		t.Fatalf("len(thread) = %d, want 5 (pre-outreach history + Invite send + reply + two manual messages)", len(got))
 	}
 
-	send := got[0]
+	send := got[1]
 	if send.Direction != DirectionOutbound {
 		t.Errorf("first Direction = %q, want %q", send.Direction, DirectionOutbound)
 	}
@@ -36,7 +36,7 @@ func TestReadCampaignThread_Bidirectional(t *testing.T) {
 		t.Errorf("first OccurredAt = %q", send.OccurredAt)
 	}
 
-	reply := got[1]
+	reply := got[2]
 	if reply.Direction != DirectionInbound {
 		t.Errorf("second Direction = %q, want %q", reply.Direction, DirectionInbound)
 	}
@@ -69,11 +69,11 @@ func TestReadCampaignThread_ManualMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadCampaignThread: %v", err)
 	}
-	if len(got) != 4 {
-		t.Fatalf("len(thread) = %d, want 4", len(got))
+	if len(got) != 5 {
+		t.Fatalf("len(thread) = %d, want 5", len(got))
 	}
 
-	ours := got[2]
+	ours := got[3]
 	if ours.Direction != DirectionOutbound {
 		t.Errorf("manual answer Direction = %q, want %q", ours.Direction, DirectionOutbound)
 	}
@@ -84,7 +84,7 @@ func TestReadCampaignThread_ManualMessages(t *testing.T) {
 		t.Errorf("manual answer Body = %v", ours.Body)
 	}
 
-	theirs := got[3]
+	theirs := got[4]
 	if theirs.Direction != DirectionInbound {
 		t.Errorf("manual follow-up Direction = %q, want %q", theirs.Direction, DirectionInbound)
 	}
@@ -115,6 +115,7 @@ func TestReadCampaignThread_SendTimeNotDetectionTime(t *testing.T) {
 		messageID  int64
 		occurredAt string
 	}{
+		{12, "2023-05-04T11:00:00.000Z"},
 		{4, "2026-01-05T12:00:00.000Z"},
 		{1, "2026-01-07T09:55:00.000Z"},
 		{10, "2026-01-07T19:02:00.000Z"},
@@ -152,8 +153,8 @@ func TestReadCampaignThread_NoDuplicates(t *testing.T) {
 			t.Errorf("message %d appears %d times, want 1", id, count)
 		}
 	}
-	if got[0].ActionID != 101 {
-		t.Errorf("mirrored Invite lost its action attribution: ActionID = %d, want 101", got[0].ActionID)
+	if got[1].ActionID != 101 {
+		t.Errorf("mirrored Invite lost its action attribution: ActionID = %d, want 101", got[1].ActionID)
 	}
 }
 

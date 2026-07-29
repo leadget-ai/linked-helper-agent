@@ -144,11 +144,17 @@ func (r *Reader) readLinkedReplies(ctx context.Context, db *sql.DB, profile *DBP
 // sit on the owner's row and stay out of the reply feed (they reach the platform
 // as thread messages instead).
 //
-// A person can be targeted by several campaigns, so the message is attributed to
-// one of them deterministically: the campaign whose action last touched that
-// person before the message, falling back to their earliest campaign when the
-// message predates every result. That keeps a manual reply from being reported
-// once per campaign the person belongs to.
+// A message counts only if the campaign had already acted on that person when it
+// was written. Being a campaign target is not enough: the account owner may have
+// known the person for years, and their whole LinkedIn history sits in the same
+// chat — messages from before we ever reached out are not answers to our
+// outreach, and letting them through inflates a campaign's reply and positive
+// counts with conversations it never caused.
+//
+// That rule also settles attribution when a person is targeted by several
+// campaigns: the message belongs to the campaign whose action last touched them
+// before it was sent. No such action means no campaign can claim it, so it is
+// skipped — never folded into whichever campaign happens to be the oldest.
 func (r *Reader) readManualReplies(ctx context.Context, db *sql.DB, campaignID int64, sinceDetectedAt string, limit int) ([]CampaignReply, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
@@ -178,16 +184,14 @@ func (r *Reader) readManualReplies(ctx context.Context, db *sql.DB, campaignID i
 		  AND NOT EXISTS (
 			SELECT 1 FROM action_result_messages arm WHERE arm.message_id = m.id
 		)
-		  AND COALESCE(
-			(SELECT last.campaign_id FROM person_in_campaigns_history last
-				WHERE last.person_id = author.person_id
-				  AND last.campaign_id IS NOT NULL
-				  AND last.result_created_at IS NOT NULL
-				  AND last.result_created_at <= m.send_at
-				ORDER BY last.result_created_at DESC, last.campaign_id
-				LIMIT 1),
-			(SELECT MIN(earliest.campaign_id) FROM person_in_campaigns_history earliest
-				WHERE earliest.person_id = author.person_id AND earliest.campaign_id IS NOT NULL)
+		  AND (
+			SELECT last.campaign_id FROM person_in_campaigns_history last
+			WHERE last.person_id = author.person_id
+			  AND last.campaign_id IS NOT NULL
+			  AND last.result_created_at IS NOT NULL
+			  AND last.result_created_at <= m.send_at
+			ORDER BY last.result_created_at DESC, last.campaign_id
+			LIMIT 1
 		  ) = ?
 		  AND STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at) >= ?
 		ORDER BY STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at)

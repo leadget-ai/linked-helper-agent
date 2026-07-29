@@ -182,6 +182,18 @@ func seedCampaign(db *sql.DB) error {
 				sentAt:     "2026-01-08T08:10:00.000Z",
 				detectedAt: "2026-02-01T09:00:00.000Z",
 			},
+			// Written years before this campaign ever touched Jane: the owner
+			// already knew her, and LH mirrors that whole history into the same
+			// chat. It belongs in the conversation but is no answer to our
+			// outreach, so it must never reach the reply feed.
+			{
+				messageID:  12,
+				externalID: "2-manual-preoutreach-0012",
+				text:       "Hey! Long time no see — how have you been?",
+				fromPerson: true,
+				sentAt:     "2023-05-04T11:00:00.000Z",
+				detectedAt: "2026-02-01T08:00:00.000Z",
+			},
 		},
 	})
 
