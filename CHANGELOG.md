@@ -1,3 +1,10 @@
+# [1.6.0](https://github.com/leadget-ai/linked-helper-agent/compare/v1.5.1...v1.6.0) (2026-07-29)
+
+
+### Features
+
+* **replies:** refine manual reply attribution logic to exclude pre-outreach messages ([ba0d5fd](https://github.com/leadget-ai/linked-helper-agent/commit/ba0d5fdbaf4b088ad0fde28ecd38497308ca33f6))
+
 ## [1.5.1](https://github.com/leadget-ai/linked-helper-agent/compare/v1.5.0...v1.5.1) (2026-07-29)
 
 
