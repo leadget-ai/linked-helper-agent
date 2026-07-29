@@ -161,13 +161,18 @@ func seedCampaign(db *sql.DB) error {
 			{messageID: 1, fromPerson: true},
 		},
 		manualMessages: []manualChatMessage{
+			// Detection order is deliberately the REVERSE of send order: LH
+			// imported this chat in one pass long after the fact, and within
+			// that pass row insertion says nothing about when a message was
+			// sent. A reader that timestamps or sorts by created_at puts these
+			// two the wrong way round — which is the bug the thread tests lock.
 			{
 				messageID:  10,
 				externalID: "2-manual-ours-0010",
 				text:       "Great — booked us Thursday 3pm, talk then!",
 				fromPerson: false,
 				sentAt:     "2026-01-07T19:02:00.000Z",
-				detectedAt: "2026-01-07T19:05:00.000Z",
+				detectedAt: "2026-02-01T10:00:00.000Z",
 			},
 			{
 				messageID:  11,
@@ -175,7 +180,7 @@ func seedCampaign(db *sql.DB) error {
 				text:       "Perfect, see you Thursday.",
 				fromPerson: true,
 				sentAt:     "2026-01-08T08:10:00.000Z",
-				detectedAt: "2026-01-08T08:30:00.000Z",
+				detectedAt: "2026-02-01T09:00:00.000Z",
 			},
 		},
 	})

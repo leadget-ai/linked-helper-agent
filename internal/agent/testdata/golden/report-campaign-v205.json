@@ -88,7 +88,7 @@
         "headline": "Head of Engineering at Acme"
       },
       "text": "Thanks for reaching out — happy to chat next week.",
-      "sentAt": "2026-01-07T09:55:00Z",
+      "sentAt": "2026-01-07T09:55:00.000Z",
       "detectedAt": "2026-01-07T18:30:00.000Z",
       "thread": [
         {
@@ -103,21 +103,21 @@
           "direction": "inbound",
           "body": "Thanks for reaching out — happy to chat next week.",
           "seqNumber": null,
-          "occurredAt": "2026-01-07T18:30:00.000Z"
+          "occurredAt": "2026-01-07T09:55:00.000Z"
         },
         {
           "externalId": "454999:500:10",
           "direction": "outbound",
           "body": "Great — booked us Thursday 3pm, talk then!",
           "seqNumber": null,
-          "occurredAt": "2026-01-07T19:05:00.000Z"
+          "occurredAt": "2026-01-07T19:02:00.000Z"
         },
         {
           "externalId": "454999:500:11",
           "direction": "inbound",
           "body": "Perfect, see you Thursday.",
           "seqNumber": null,
-          "occurredAt": "2026-01-08T08:30:00.000Z"
+          "occurredAt": "2026-01-08T08:10:00.000Z"
         }
       ]
     },
@@ -131,8 +131,8 @@
         "headline": "Head of Engineering at Acme"
       },
       "text": "Perfect, see you Thursday.",
-      "sentAt": "2026-01-08T08:10:00Z",
-      "detectedAt": "2026-01-08T08:30:00.000Z",
+      "sentAt": "2026-01-08T08:10:00.000Z",
+      "detectedAt": "2026-02-01T09:00:00.000Z",
       "thread": [
         {
           "externalId": "454999:500:4",
@@ -146,21 +146,21 @@
           "direction": "inbound",
           "body": "Thanks for reaching out — happy to chat next week.",
           "seqNumber": null,
-          "occurredAt": "2026-01-07T18:30:00.000Z"
+          "occurredAt": "2026-01-07T09:55:00.000Z"
         },
         {
           "externalId": "454999:500:10",
           "direction": "outbound",
           "body": "Great — booked us Thursday 3pm, talk then!",
           "seqNumber": null,
-          "occurredAt": "2026-01-07T19:05:00.000Z"
+          "occurredAt": "2026-01-07T19:02:00.000Z"
         },
         {
           "externalId": "454999:500:11",
           "direction": "inbound",
           "body": "Perfect, see you Thursday.",
           "seqNumber": null,
-          "occurredAt": "2026-01-08T08:30:00.000Z"
+          "occurredAt": "2026-01-08T08:10:00.000Z"
         }
       ]
     }

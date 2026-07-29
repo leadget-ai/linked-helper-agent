@@ -106,7 +106,7 @@ func (r *Reader) readLinkedReplies(ctx context.Context, db *sql.DB, profile *DBP
 			mei.external_id,
 			m.subject,
 			m.message_text,
-			m.send_at,
+			STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.send_at) AS sent_at,
 			STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at) AS detected_at,
 			(SELECT pe.external_id FROM person_external_ids pe
 				WHERE pe.person_id = ar.person_id AND pe.type_group = 'member' LIMIT 1) AS member_id,
@@ -157,7 +157,7 @@ func (r *Reader) readManualReplies(ctx context.Context, db *sql.DB, campaignID i
 			mei.external_id,
 			m.subject,
 			m.message_text,
-			m.send_at,
+			STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.send_at) AS sent_at,
 			STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at) AS detected_at,
 			(SELECT pe.external_id FROM person_external_ids pe
 				WHERE pe.person_id = author.person_id AND pe.type_group = 'member' LIMIT 1) AS member_id,

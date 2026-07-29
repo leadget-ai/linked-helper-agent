@@ -43,8 +43,10 @@ func TestReadCampaignThread_Bidirectional(t *testing.T) {
 	if reply.Body == nil || *reply.Body != "Thanks for reaching out — happy to chat next week." {
 		t.Errorf("second Body = %v", reply.Body)
 	}
-	if reply.OccurredAt != "2026-01-07T18:30:00.000Z" {
-		t.Errorf("second OccurredAt = %q", reply.OccurredAt)
+	// The LinkedIn send time (09:55), not LH's detection time (18:30) — the
+	// fixture keeps them apart precisely to lock which one reaches the wire.
+	if reply.OccurredAt != "2026-01-07T09:55:00.000Z" {
+		t.Errorf("second OccurredAt = %q, want the send time, not LH's detection time", reply.OccurredAt)
 	}
 	for i := 1; i < len(got); i++ {
 		if got[i-1].OccurredAt > got[i].OccurredAt {
@@ -91,6 +93,41 @@ func TestReadCampaignThread_ManualMessages(t *testing.T) {
 	}
 	if theirs.Body == nil || *theirs.Body != "Perfect, see you Thursday." {
 		t.Errorf("manual follow-up Body = %v", theirs.Body)
+	}
+}
+
+// TestReadCampaignThread_SendTimeNotDetectionTime pins the timestamp a thread
+// message carries. LH imports an existing chat in one pass, so created_at is the
+// insert moment: a conversation spanning weeks collapses into milliseconds, and
+// insert order need not match send order at all. The fixture's two manual
+// messages are detected in the REVERSE of the order they were sent, so reading
+// created_at would both mis-time them and swap them.
+func TestReadCampaignThread_SendTimeNotDetectionTime(t *testing.T) {
+	r := NewReader()
+	defer r.Close()
+
+	got, err := r.ReadCampaignThread(context.Background(), fixture("campaign-v205"), 500, 3)
+	if err != nil {
+		t.Fatalf("ReadCampaignThread: %v", err)
+	}
+
+	want := []struct {
+		messageID  int64
+		occurredAt string
+	}{
+		{4, "2026-01-05T12:00:00.000Z"},
+		{1, "2026-01-07T09:55:00.000Z"},
+		{10, "2026-01-07T19:02:00.000Z"},
+		{11, "2026-01-08T08:10:00.000Z"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len(thread) = %d, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].MessageID != w.messageID || got[i].OccurredAt != w.occurredAt {
+			t.Errorf("message %d = id %d at %q, want id %d at %q",
+				i, got[i].MessageID, got[i].OccurredAt, w.messageID, w.occurredAt)
+		}
 	}
 }
 

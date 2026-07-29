@@ -21,8 +21,14 @@ const (
 // resolve an outbound message's seq number; inbound messages sit on the
 // CheckForReplies step and resolve to no seq. MessageID is LH's local message
 // id — unique only within one lh.db, so the caller namespaces it before it goes
-// on the wire. OccurredAt is the message time, canonicalized to millisecond
-// precision the same way replies/sends are.
+// on the wire.
+//
+// OccurredAt is when the message was sent on LinkedIn (messages.send_at),
+// canonicalized to millisecond precision like every other timestamp on the
+// wire. It is deliberately NOT messages.created_at: that column records when LH
+// inserted the row locally, and LH imports a whole existing chat in one pass, so
+// a conversation spanning months collapses into a few milliseconds of insert
+// time and its messages sort after decade-old replies in the platform's inbox.
 type ThreadMessage struct {
 	MessageID  int64
 	ActionID   int64
@@ -57,7 +63,7 @@ var threadTables = []string{
 // action and therefore no seq, which is what they are — messages outside the
 // campaign's workflow.
 //
-// created_at is returned through the same strftime canonicalization used for the
+// send_at is returned through the same strftime canonicalization used for the
 // reply cursor so a thread message's occurredAt compares byte-for-byte with the
 // values the platform already stores for that campaign's replies and sends.
 func (r *Reader) ReadCampaignThread(ctx context.Context, dbPath string, campaignID, personID int64) ([]ThreadMessage, error) {
@@ -95,14 +101,14 @@ func (r *Reader) readLinkedThread(ctx context.Context, db *sql.DB, profile *DBPr
 			arm.type,
 			pich.action_id,
 			m.id AS message_id,
-			STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at) AS occurred_at,
+			STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.send_at) AS occurred_at,
 			m.message_text
 		FROM person_in_campaigns_history pich
 		JOIN action_result_messages arm ON arm.action_result_id = pich.result_id
 		JOIN messages m               ON m.id = arm.message_id
 		WHERE pich.campaign_id = ?
 		  AND pich.person_id = ?
-		ORDER BY STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at)
+		ORDER BY STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.send_at)
 	`, campaignID, personID)
 	if err != nil {
 		return nil, fmt.Errorf("select campaign thread: %w", err)
@@ -141,14 +147,14 @@ func (r *Reader) readChatThread(ctx context.Context, db *sql.DB, personID int64)
 		SELECT
 			m.id AS message_id,
 			CASE WHEN author.person_id = ? THEN 1 ELSE 0 END AS is_inbound,
-			STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at) AS occurred_at,
+			STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.send_at) AS occurred_at,
 			m.message_text
 		FROM chat_participants member
 		JOIN chat_participants author  ON author.chat_id = member.chat_id
 		JOIN participant_messages pm   ON pm.chat_participant_id = author.id
 		JOIN messages m                ON m.id = pm.message_id
 		WHERE member.person_id = ?
-		ORDER BY STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.created_at)
+		ORDER BY STRFTIME('%Y-%m-%dT%H:%M:%fZ', m.send_at)
 	`, personID, personID)
 	if err != nil {
 		return nil, fmt.Errorf("select chat thread: %w", err)

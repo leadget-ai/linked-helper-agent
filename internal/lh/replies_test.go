@@ -75,7 +75,7 @@ func TestReadCampaignReplies_Manual(t *testing.T) {
 	if manual.MemberID == nil || *manual.MemberID != "555666777" {
 		t.Errorf("MemberID = %v, want the replier's member id", manual.MemberID)
 	}
-	if manual.SentAt != "2026-01-08T08:10:00Z" || manual.DetectedAt != "2026-01-08T08:30:00.000Z" {
+	if manual.SentAt != "2026-01-08T08:10:00.000Z" || manual.DetectedAt != "2026-02-01T09:00:00.000Z" {
 		t.Errorf("SentAt/DetectedAt = %q/%q", manual.SentAt, manual.DetectedAt)
 	}
 	if !(got[0].DetectedAt < manual.DetectedAt) {
@@ -104,7 +104,7 @@ func TestReadCampaignReplies_ManualCursor(t *testing.T) {
 		t.Fatalf("len(replies) = %d at the linked reply's cursor, want 2 (boundary re-read + manual)", len(got))
 	}
 
-	got, err = r.ReadCampaignReplies(ctx, fixture("campaign-v205"), 500, "2026-01-08T08:30:00.001Z", 500)
+	got, err = r.ReadCampaignReplies(ctx, fixture("campaign-v205"), 500, "2026-02-01T09:00:00.001Z", 500)
 	if err != nil {
 		t.Fatalf("ReadCampaignReplies: %v", err)
 	}
