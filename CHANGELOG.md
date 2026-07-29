@@ -1,3 +1,10 @@
+## [1.5.1](https://github.com/leadget-ai/linked-helper-agent/compare/v1.5.0...v1.5.1) (2026-07-29)
+
+
+### Bug Fixes
+
+* **thread:** ensure timestamps reflect message send times instead of detection times ([ed32e2e](https://github.com/leadget-ai/linked-helper-agent/commit/ed32e2e72615d123e012968682054df775357aa5))
+
 # [1.5.0](https://github.com/leadget-ai/linked-helper-agent/compare/v1.4.0...v1.5.0) (2026-07-28)
 
 
