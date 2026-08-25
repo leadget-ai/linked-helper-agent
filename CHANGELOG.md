@@ -1,3 +1,10 @@
+# [1.7.0](https://github.com/leadget-ai/linked-helper-agent/compare/v1.6.0...v1.7.0) (2026-08-25)
+
+
+### Features
+
+* **reader:** implement ReleaseHandles method to manage SQLite connections between cycles ([68516d3](https://github.com/leadget-ai/linked-helper-agent/commit/68516d35334e7556e2a34d9a2b09ff035e8bcbea))
+
 # [1.6.0](https://github.com/leadget-ai/linked-helper-agent/compare/v1.5.1...v1.6.0) (2026-07-29)
 
 
