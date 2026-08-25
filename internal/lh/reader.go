@@ -52,8 +52,10 @@ func (o *AccountOwner) isEmpty() bool {
 }
 
 // Reader owns one lazily-opened SQLite handle (and capability profile) per LH
-// partition, kept across cycles — reopening every cycle would defeat WAL
-// caching and leak file descriptors on long-running agents.
+// partition. The handle lives only as long as someone holds the partition:
+// lh.db runs on a rollback journal, not WAL, so an idle reader still sits on
+// the file between cycles — and LH, which needs an exclusive lock to recover
+// its journal at startup, fails to initialize when it finds one there.
 type Reader struct {
 	mu       sync.Mutex
 	handles  map[string]*sql.DB
@@ -87,8 +89,10 @@ func (r *Reader) profileFor(ctx context.Context, dbPath string, db *sql.DB) *DBP
 	return profile
 }
 
-// Close releases every cached connection. Call from agent shutdown.
-func (r *Reader) Close() error {
+// ReleaseHandles closes every open connection, leaving the Reader usable — the
+// next read reopens what it needs. Called at the end of every cycle so the agent
+// spends the wait between cycles off LH's file entirely.
+func (r *Reader) ReleaseHandles() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var firstErr error
@@ -101,11 +105,18 @@ func (r *Reader) Close() error {
 	return firstErr
 }
 
-// open returns the cached *sql.DB for `dbPath`, creating it on first access.
-// Strictly read-only so we never block the LH desktop process holding the
-// file. busy_timeout is the only pragma that is safe here: journal_mode and
-// (on modernc's driver) foreign_keys go through the write path and fail on a
-// mode=ro handle — WAL is inherited from LH's own connection anyway.
+// Close releases every cached connection. Call from agent shutdown.
+func (r *Reader) Close() error {
+	return r.ReleaseHandles()
+}
+
+// open returns the cached *sql.DB for `dbPath`, creating it on first access and
+// keeping it only until the cycle releases it. Read-only, which limits what we
+// can do to the file but not what we can hold: on a rollback journal every read
+// still takes a shared lock, and a shared lock is what LH's own writes wait on.
+// busy_timeout is the only pragma that is safe here: journal_mode and (on
+// modernc's driver) foreign_keys go through the write path and fail on a
+// mode=ro handle.
 func (r *Reader) open(dbPath string) (*sql.DB, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

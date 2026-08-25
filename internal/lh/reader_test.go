@@ -237,3 +237,30 @@ func mkPartition(t *testing.T, dir, name string, withDB bool) {
 		}
 	}
 }
+
+func TestReleaseHandlesLeavesReaderUsable(t *testing.T) {
+	r := NewReader()
+	defer r.Close()
+
+	if _, err := r.ReadCampaigns(context.Background(), fixture("campaign-v205"), ""); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	if len(r.handles) != 1 {
+		t.Fatalf("handles after read = %d, want 1", len(r.handles))
+	}
+
+	if err := r.ReleaseHandles(); err != nil {
+		t.Fatalf("ReleaseHandles: %v", err)
+	}
+	if len(r.handles) != 0 {
+		t.Fatalf("handles after release = %d, want 0 — the file stays ours between cycles", len(r.handles))
+	}
+
+	got, err := r.ReadCampaigns(context.Background(), fixture("campaign-v205"), "")
+	if err != nil {
+		t.Fatalf("read after release: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(campaigns) after release = %d, want 1", len(got))
+	}
+}

@@ -143,6 +143,16 @@ func (a *Agent) bootstrap(ctx context.Context) {
 // cycle scans partitions and syncs each account in parallel, bounded by
 // NumCPU (SQLite reads are the CPU-bound part).
 func (a *Agent) cycle(ctx context.Context) {
+	// LH keeps lh.db on a rollback journal, where our reader and its writer
+	// cannot both hold the file. Between cycles we have no reason to be on it at
+	// all, and LH — which needs an exclusive lock to recover its journal when it
+	// starts — has every reason to find it free.
+	defer func() {
+		if err := a.reader.ReleaseHandles(); err != nil {
+			log.WithError(err).Warn("release lh.db handles failed")
+		}
+	}()
+
 	a.bootstrap(ctx)
 
 	accounts, err := lh.Scan(a.cfg.PartitionsDir)
