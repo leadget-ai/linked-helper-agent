@@ -139,9 +139,11 @@ type CampaignFunnel struct {
 }
 
 type FunnelStep struct {
-	SeqNumber int `json:"seqNumber"`
-	Sent      int `json:"sent"`
-	Replied   int `json:"replied"`
+	SentExample        **string `json:"sentExample,omitempty"`
+	SentExampleSubject **string `json:"sentExampleSubject,omitempty"`
+	SeqNumber          int      `json:"seqNumber"`
+	Sent               int      `json:"sent"`
+	Replied            int      `json:"replied"`
 }
 
 // CampaignReply is one inbound reply to the account's cold outreach. Only

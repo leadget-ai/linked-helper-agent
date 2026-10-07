@@ -285,6 +285,14 @@ func (a *Agent) classifyCampaigns(
 		kinds[c.ID] = lh.ClassifyLinkedinKind(types)
 		steps[c.ID] = buildFunnelSteps(stats)
 		seqs[c.ID] = buildActionSeqMap(stats)
+		examples, supported, err := a.reader.ReadCampaignMessageExamples(ctx, acc.DBPath, c.ID)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{"accountId": acc.ID, "campaignId": c.ID}).Warn("read campaign message examples failed")
+			continue
+		}
+		if supported {
+			attachMessageExamples(steps[c.ID], seqs[c.ID], examples)
+		}
 	}
 	return kinds, steps, seqs
 }
@@ -597,7 +605,7 @@ func buildActionSeqMap(steps []lh.StepStat) map[int64]int {
 	out := make(map[int64]int, len(steps))
 	seq := 0
 	for _, s := range steps {
-		if _, isMessage := messageActionTypes[s.Type]; isMessage {
+		if isMessageStep(s) {
 			seq++
 			out[s.ActionID] = seq
 		}
@@ -673,11 +681,11 @@ func buildFunnelSteps(steps []lh.StepStat) []client.FunnelStep {
 	seq := 0
 	lastMsgIdx := -1
 	for _, s := range steps {
-		if _, isMessage := messageActionTypes[s.Type]; isMessage {
+		if isMessageStep(s) {
 			seq++
 			out = append(out, client.FunnelStep{SeqNumber: seq, Sent: s.Sent, Replied: s.Replied})
 			lastMsgIdx = len(out) - 1
-		} else if lastMsgIdx >= 0 && s.Replied > 0 {
+		} else if _, isMessage := messageActionTypes[s.Type]; !isMessage && lastMsgIdx >= 0 && s.Replied > 0 {
 			out[lastMsgIdx].Replied += s.Replied
 		}
 	}
@@ -736,4 +744,27 @@ func waitToDelay(ms int64) (int, string) {
 
 func hasOwnerSignal(o *lh.AccountOwner) bool {
 	return o.ExternalID != nil || o.Email != nil || o.FullName != nil || o.ProfileURL != nil
+}
+
+func attachMessageExamples(steps []client.FunnelStep, seqs map[int64]int, examples map[int64]lh.CampaignMessageExample) {
+	for i := range steps {
+		var body *string
+		var subject *string
+		for actionID, seq := range seqs {
+			if seq != steps[i].SeqNumber {
+				continue
+			}
+			if sample, ok := examples[actionID]; ok {
+				body = &sample.Body
+				subject = sample.Subject
+			}
+		}
+		steps[i].SentExample = &body
+		steps[i].SentExampleSubject = &subject
+	}
+}
+
+func isMessageStep(step lh.StepStat) bool {
+	_, messaging := messageActionTypes[step.Type]
+	return messaging && (step.HasMessageBody == nil || *step.HasMessageBody)
 }

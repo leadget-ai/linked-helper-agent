@@ -65,11 +65,13 @@
       "linkedinKind": "regular",
       "steps": [
         {
+          "sentExample": "Hi Sam, let's connect!",
           "seqNumber": 1,
           "sent": 3,
           "replied": 2
         },
         {
+          "sentExample": "Thanks for connecting, Sam!",
           "seqNumber": 2,
           "sent": 1,
           "replied": 0

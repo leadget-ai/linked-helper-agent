@@ -113,6 +113,10 @@ func TestReadCampaignStepStats(t *testing.T) {
 		t.Fatalf("len(stats) = %d, want %d", len(got), len(want))
 	}
 	for i, w := range want {
+		if got[i].HasMessageBody == nil || *got[i].HasMessageBody != (i == 0 || i == 2) {
+			t.Errorf("stat[%d] message presence mismatch", i)
+		}
+		got[i].HasMessageBody = nil
 		if got[i] != w {
 			t.Errorf("stat[%d] = %+v, want %+v", i, got[i], w)
 		}
