@@ -1,3 +1,10 @@
+## [1.7.1](https://github.com/leadget-ai/linked-helper-agent/compare/v1.7.0...v1.7.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* report real campaign message examples ([ba7f08a](https://github.com/leadget-ai/linked-helper-agent/commit/ba7f08a8129c6b4e52a28252d80deaf46a006770))
+
 # [1.7.0](https://github.com/leadget-ai/linked-helper-agent/compare/v1.6.0...v1.7.0) (2026-08-25)
 
 
