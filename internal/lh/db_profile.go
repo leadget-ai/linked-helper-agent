@@ -23,6 +23,8 @@ type DBProfile struct {
 // probe. Listing them up front keeps BuildDBProfile to a handful of cheap
 // pragma calls instead of walking the whole schema.
 var profiledTables = []string{
+	"campaign_last_versions",
+	"campaign_version_actions",
 	"li_accounts",
 	"person_member_distance",
 	"person_external_ids",
